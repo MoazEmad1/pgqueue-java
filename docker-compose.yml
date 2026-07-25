@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:17.2-alpine
+    ports:
+      - "15555:5432"
+    environment:
+      POSTGRES_USER: pgqueue
+      POSTGRES_PASSWORD: pgqueue
+      POSTGRES_DB: pgqueue
+    volumes:
+      - ./postgres.conf:/etc/postgresql/postgresql.conf:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgqueue"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
