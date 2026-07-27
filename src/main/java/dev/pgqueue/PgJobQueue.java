@@ -5,7 +5,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.Optional;
 
 public final class PgJobQueue implements JobQueue {
@@ -74,7 +74,7 @@ public final class PgJobQueue implements JobQueue {
             return Optional.of(new Job(
                     rs.getLong(1),
                     rs.getBytes(2),
-                    rs.getObject(3, Instant.class)));
+                    rs.getObject(3, OffsetDateTime.class).toInstant()));
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
