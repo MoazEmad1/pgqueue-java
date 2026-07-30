@@ -27,14 +27,15 @@ Everything in this repo exists to answer that. Features are added when an experi
 
 ## Status
 
-Nothing works yet. This README states the question; the code does not exist.
+Building the harness. No experimental results yet.
 
-Planned:
-
-- [ ] Walking skeleton: schema, claim path, worker loop, load generator
-- [ ] Experiment specification — workload, antagonist, and a numeric definition of "collapse", written before any results exist
-- [ ] Reproduction of the death spiral on demand
-- [ ] Mitigations, measured one at a time
+- [x] Walking skeleton: schema, single-statement `SKIP LOCKED` claim path, virtual-thread worker loop, dual-mode load generator (open-loop and saturated)
+- [x] Experiment specification — workload, antagonist, and a numeric definition of "collapse", written before any results exist ([`docs/experiment.md`](docs/experiment.md))
+- [x] Observability spine: per-second Postgres metrics collector (dead tuples, heap and index size, oldest `backend_xmin` age) and per-run CSV writer matching the spec's column set
+- [ ] Antagonist: REPEATABLE READ xmin-holder plus its verification query
+- [ ] End-to-end experiment runner producing one `results/<run-id>.csv` per run
+- [ ] Reproduction of the death spiral on demand (runs R1–R3, per spec)
+- [ ] Mitigations, measured one at a time (M1–M5, per spec)
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
 
