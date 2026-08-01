@@ -81,14 +81,21 @@ class ExperimentTest {
 
         //Antagonist column: field index 4 in the CSV row.
         boolean sawInactive = false, sawActive = false;
+        double throughputTotal = 0.0;
+        boolean sawNonzeroLatency = false;
         for (int i = 1; i < lines.size(); i++) {
             String[] cols = lines.get(i).split(",");
             assertEquals("smoke", cols[0]);
             assertEquals("saturated", cols[2]);
             if (cols[4].equals("false")) sawInactive = true;
             if (cols[4].equals("true"))  sawActive = true;
+            throughputTotal += Double.parseDouble(cols[5]);
+            if (Double.parseDouble(cols[10]) > 0.0) sawNonzeroLatency = true; // e2e_p50
         }
         assertTrue(sawInactive, "antagonist should be inactive at t < 2s");
         assertTrue(sawActive,   "antagonist should be active at t >= 2s");
+        assertTrue(throughputTotal > 0,
+                "at least one tick should show non-zero throughput, saw " + throughputTotal);
+        assertTrue(sawNonzeroLatency, "at least one tick should show non-zero e2e latency");
     }
 }

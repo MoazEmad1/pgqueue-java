@@ -1,6 +1,7 @@
 package dev.pgqueue;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,14 +18,21 @@ public final class WorkerLoop implements AutoCloseable {
     private final int workers;
     private final Duration idleBackoff;
     private final Handler handler;
+    private final WorkloadStats stats;
     private final ExecutorService exec;
     private volatile boolean running;
 
     public WorkerLoop(JobQueue queue, int workers, Duration idleBackoff, Handler handler) {
+        this(queue, workers, idleBackoff, handler, null);
+    }
+
+    public WorkerLoop(JobQueue queue, int workers, Duration idleBackoff,
+                      Handler handler, WorkloadStats stats) {
         this.queue = queue;
         this.workers = workers;
         this.idleBackoff = idleBackoff;
         this.handler = handler;
+        this.stats = stats;
         this.exec = Executors.newVirtualThreadPerTaskExecutor();
     }
 
@@ -37,7 +45,9 @@ public final class WorkerLoop implements AutoCloseable {
 
     private void runOne() {
         while (running) {
+            long claimStartNs = System.nanoTime();
             Optional<Job> claimed = queue.claim();
+            long claimEndNs = System.nanoTime();
             if (claimed.isEmpty()) {
                 try { Thread.sleep(idleBackoff); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
@@ -49,6 +59,11 @@ public final class WorkerLoop implements AutoCloseable {
                 queue.complete(job.id());
             } catch (Exception e) {
                 queue.fail(job.id());
+            }
+            if (stats != null) {
+                long claimLatencyNs = claimEndNs - claimStartNs;
+                long e2eLatencyNs = Duration.between(job.createdAt(), Instant.now()).toNanos();
+                stats.record(claimLatencyNs, e2eLatencyNs);
             }
         }
     }

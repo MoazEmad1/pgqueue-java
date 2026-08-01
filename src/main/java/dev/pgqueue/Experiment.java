@@ -15,9 +15,8 @@ public final class Experiment {
 
     /*
      Wires antagonist + load generator + worker loop + metrics collector + CSV
-     writer into a single run. Emits one CSV row per second for the run duration.
-     Throughput and latency columns are currently zero
-      the instrumentation layer lands next.
+     writer into a single run. Emits one CSV row per second for the run duration,
+     with throughput and latencies drained from a per-tick WorkloadStats reservoir.
      */
     public static void run(
             DataSource ds,
@@ -32,6 +31,7 @@ public final class Experiment {
 
         PgJobQueue queue = new PgJobQueue(ds);
         AtomicReference<MetricsSample> latest = new AtomicReference<>();
+        WorkloadStats stats = new WorkloadStats();
 
         try (MetricsCollector metrics = new MetricsCollector(
                     ds, java.time.Duration.ofMillis(500), latest::set);
@@ -42,7 +42,8 @@ public final class Experiment {
                         if (plan.handlerWork() != null && !plan.handlerWork().isZero()) {
                             Thread.sleep(plan.handlerWork());
                         }
-                    });
+                    },
+                    stats);
              ResultsCsv csv = ResultsCsv.forRun(resultsDir, plan.runId())) {
 
             metrics.start();
@@ -69,10 +70,13 @@ public final class Experiment {
                     }
 
                     MetricsSample m = latest.get();
+                    WorkloadStats.Snapshot ss = stats.snapshotAndReset();
                     csv.append(new RunSample(
                             plan.runId(), t, plan.configName(), plan.mitigation(),
                             antagonist != null,
-                            0.0, 0, 0, 0, 0, 0, 0,
+                            ss.completedInWindow(),
+                            ss.claimP50Ms(), ss.claimP95Ms(), ss.claimP99Ms(),
+                            ss.e2eP50Ms(),   ss.e2eP95Ms(),   ss.e2eP99Ms(),
                             m == null ? 0 : m.deadTuples(),
                             m == null ? 0 : m.liveTuples(),
                             m == null ? 0 : m.tableBytes(),
