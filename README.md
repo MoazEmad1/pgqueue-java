@@ -27,7 +27,7 @@ Everything in this repo exists to answer that. Features are added when an experi
 
 ## Status
 
-Harness complete. Control run C1 passed — sustained load alone does not collapse the queue.
+Death spiral reproduced across R1–R3 — all three runs collapsed with the same causal chain (antagonist → held xmin → dead-tuple accumulation → throughput crater). Onset of degradation (`t_50`) is deterministic; deep-collapse onset (`t_25`) has more variance than pre-registered — see disclosure below.
 
 - [x] Walking skeleton: schema, single-statement `SKIP LOCKED` claim path, virtual-thread worker loop, dual-mode load generator (open-loop and saturated)
 - [x] Experiment specification — workload, antagonist, and a numeric definition of "collapse", written before any results exist ([`docs/experiment.md`](docs/experiment.md))
@@ -35,11 +35,25 @@ Harness complete. Control run C1 passed — sustained load alone does not collap
 - [x] Antagonist: REPEATABLE READ xmin-holder plus its verification query
 - [x] End-to-end experiment runner and CLI producing one `results/<run-id>.csv` per run
 - [x] Analyzer computing `B`, `t_50`, `t_25`, `final_ratio`, and collapse verdict into `results/<run-id>.meta.json`
-- [x] **C1 control run** — 45 min saturated, no antagonist. `B = 1326.83 jobs/sec`, `final_ratio = 0.95`, collapse not declared. The experiment is now valid to run.
-- [ ] Reproduction of the death spiral on demand (runs R1–R3, per spec)
+- [x] **C1 control run** — 45 min saturated, no antagonist. `B = 1326.83 jobs/sec`, `final_ratio = 0.95`, collapse not declared. The experiment is valid to run.
+- [x] **R1–R3 reproduction** — all three declared collapse. See table below.
 - [ ] Mitigations, measured one at a time (M1–M5, per spec)
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
+
+### Reproduction results (R1–R3)
+
+| run | B (jobs/sec) | t_50 | t_25 | final_ratio | collapse |
+|-----|-------------:|-----:|-----:|------------:|:--------:|
+| R1  | 1274 | 566 s | 1079 s | 0.130 | ✓ |
+| R2  | 1341 | 537 s | 1114 s | 0.148 | ✓ |
+| R3  | 1240 | 559 s | 1254 s | 0.169 | ✓ |
+
+**Honest disclosure — pre-registered ±60 s bound violated.** The [experiment spec](docs/experiment.md) states R1–R3 count as deterministic reproduction only when their `t_25` values fall within ±60 s of one another. The observed `t_25` spread across R1–R3 is **175 s** (1079, 1114, 1254). The finding is therefore:
+
+> The death spiral is **reproducibly triggered** by a REPEATABLE READ xmin-holder — three runs, three collapses, tightly clustered onset (`t_50` spread 29 s) and steady-state ratios (0.13–0.17). The deep-collapse onset (`t_25`) was less deterministic than the pre-registered ±60 s bound anticipated.
+
+The spec is not adjusted post-hoc. Mitigations M1–M5 measure whether they *prevent* collapse — a criterion that is well-defined regardless of `t_25` precision.
 
 ## How to run
 
