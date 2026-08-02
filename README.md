@@ -27,21 +27,41 @@ Everything in this repo exists to answer that. Features are added when an experi
 
 ## Status
 
-Building the harness. No experimental results yet.
+Harness complete. Control run C1 passed — sustained load alone does not collapse the queue.
 
 - [x] Walking skeleton: schema, single-statement `SKIP LOCKED` claim path, virtual-thread worker loop, dual-mode load generator (open-loop and saturated)
 - [x] Experiment specification — workload, antagonist, and a numeric definition of "collapse", written before any results exist ([`docs/experiment.md`](docs/experiment.md))
-- [x] Observability spine: per-second Postgres metrics collector (dead tuples, heap and index size, oldest `backend_xmin` age) and per-run CSV writer matching the spec's column set
-- [ ] Antagonist: REPEATABLE READ xmin-holder plus its verification query
-- [ ] End-to-end experiment runner producing one `results/<run-id>.csv` per run
+- [x] Observability spine: per-second Postgres metrics collector (dead tuples, heap and index size, oldest `backend_xmin` age), per-tick throughput/latency reservoir, and per-run CSV writer matching the spec's column set
+- [x] Antagonist: REPEATABLE READ xmin-holder plus its verification query
+- [x] End-to-end experiment runner and CLI producing one `results/<run-id>.csv` per run
+- [x] Analyzer computing `B`, `t_50`, `t_25`, `final_ratio`, and collapse verdict into `results/<run-id>.meta.json`
+- [x] **C1 control run** — 45 min saturated, no antagonist. `B = 1326.83 jobs/sec`, `final_ratio = 0.95`, collapse not declared. The experiment is now valid to run.
 - [ ] Reproduction of the death spiral on demand (runs R1–R3, per spec)
 - [ ] Mitigations, measured one at a time (M1–M5, per spec)
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
 
+## How to run
+
+```bash
+# Postgres (docker-compose maps host port 15555 → container 5432)
+docker compose up -d
+
+# 5-minute smoke to confirm the pipeline works end-to-end
+./gradlew run --args="C1 PT5M"
+
+# real 45-minute run — one of C1 (control) or R1/R2/R3 (reproduction)
+./gradlew run --args="C1"
+
+# compute B, t_50, t_25, final_ratio and write results/<run-id>.meta.json
+./gradlew run --args="analyze C1"
+```
+
+Every run resets the DB to a known-empty state so results are reproducible. `PG_URL`, `PG_USER`, `PG_PASSWORD` override the localhost defaults.
+
 ## Stack
 
-Java 21+ (virtual threads), plain JDBC + HikariCP, Flyway, Postgres in Docker, JUnit 5 + Testcontainers, Micrometer → Prometheus → Grafana.
+Java 21+ (virtual threads), plain JDBC + HikariCP, Flyway, Postgres in Docker, JUnit 5 + Testcontainers. Instrumentation is a hand-rolled per-tick reservoir into CSV; a Micrometer/Prometheus/Grafana path may follow if the harness ever needs live dashboards.
 
 No framework in the core library. A Spring Boot starter may follow as a separate module.
 
