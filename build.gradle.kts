@@ -1,5 +1,10 @@
 plugins {
     java
+    application
+}
+
+application {
+    mainClass.set("dev.pgqueue.Main")
 }
 
 group = "dev.pgqueue"
