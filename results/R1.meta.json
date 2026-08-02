@@ -1,0 +1,12 @@
+{
+  "run_id": "R1",
+  "config": "saturated",
+  "mitigation": null,
+  "antagonist_start_seconds": 300,
+  "duration_seconds": 2700,
+  "baseline_throughput_median": 1274.000,
+  "t_50": 566,
+  "t_25": 1079,
+  "final_ratio": 0.1296,
+  "collapse_declared": true
+}
