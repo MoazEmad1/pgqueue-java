@@ -37,7 +37,7 @@ Death spiral reproduced across R1–R3 — all three runs collapsed with the sam
 - [x] Analyzer computing `B`, `t_50`, `t_25`, `final_ratio`, and collapse verdict into `results/<run-id>.meta.json`
 - [x] **C1 control run** — 45 min saturated, no antagonist. `B = 1326.83 jobs/sec`, `final_ratio = 0.95`, collapse not declared. The experiment is valid to run.
 - [x] **R1–R3 reproduction** — all three declared collapse. See table below.
-- [ ] Mitigations, measured one at a time (M1–M5, per spec)
+- [ ] Mitigations, measured one at a time (M1–M5, per spec) — **M1, M2, M3 complete, none prevent collapse; M3 collapses harder than the baseline**
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
 
@@ -54,6 +54,31 @@ Death spiral reproduced across R1–R3 — all three runs collapsed with the sam
 > The death spiral is **reproducibly triggered** by a REPEATABLE READ xmin-holder — three runs, three collapses, tightly clustered onset (`t_50` spread 29 s) and steady-state ratios (0.13–0.17). The deep-collapse onset (`t_25`) was less deterministic than the pre-registered ±60 s bound anticipated.
 
 The spec is not adjusted post-hoc. Mitigations M1–M5 measure whether they *prevent* collapse — a criterion that is well-defined regardless of `t_25` precision.
+
+### Mitigations (M1, M2, M3)
+
+| run | Mitigation applied                              | B (jobs/sec) | t_50 | t_25 | final_ratio | collapse |
+|-----|-------------------------------------------------|-------------:|-----:|-----:|------------:|:--------:|
+| M1  | aggressive per-table autovacuum                 | 1353 | 551 s | 1131 s | 0.147 | ✓ |
+| M2  | `fillfactor = 70` (HOT updates)                 | 1324 | 555 s | 996 s  | 0.134 | ✓ |
+| M3  | range partitioning on `created_at` + partition drop | 1304 | 375 s | 384 s  | 0.000 | ✓ |
+
+**M1 verdict.** Does not prevent collapse. `t_25 = 1131 s` lands inside the R1–R3 spread. The mitigation *is* active dead-tuple counts 10 s after the antagonist start are ~3× lower under M1 (24k vs 74k in R1) but once the antagonist snapshot pins the xmin horizon, autovacuum's improved aggressiveness has nothing it can reclaim. Claim p99 during collapse is 2.7× better under M1 (91 ms vs 246 ms), which may matter for latency-sensitive operators, but the throughput crater is unchanged. This matches the spec's pre-registered hypothesis: *buys time, does not prevent collapse*.
+
+**M2 verdict.** Does not prevent collapse, and does not measurably reduce index bloat either. `t_25 = 996 s` is if anything slightly earlier than R1–R3. At end of run, index bytes are 100.6 MB (M2) vs 102.8 MB (R1) a 2% difference, not the multi-x reduction HOT can deliver. Table bytes are *larger* under M2 (442 MB vs 363 MB) as expected from `fillfactor = 70` leaving 30% free space per page.
+
+The reason HOT does not fire here is structural. HOT requires that no indexed column change between the old and new tuple version. The claim path updates `state` (`pending → claimed → done`), and `state` is the leading column of the `(state, created_at)` queue index. Every job transition therefore forces a regular update with a new index entry, which is exactly what HOT would have skipped. `fillfactor = 70` is the right knob for update-heavy workloads whose updates *don't* touch indexed columns a queue driven by a `state` index is the opposite of that. Documented as a null result: this mitigation cannot help without also changing the claim strategy or the index shape.
+
+**M3 verdict.** Does not prevent collapse, and collapses *harder* than the baseline. Pre-antagonist the sweeper works exactly as intended `table_bytes` oscillates between ~15 MB and ~25 MB as partitions fill, seal, and drop, and throughput holds at ~1300 jobs/sec. The moment the antagonist starts (t = 300 s), the picture reverses:
+
+- **Faster deterioration.** `t_50 = 375 s`, `t_25 = 384 s` deep collapse arrives ~700 s earlier than R1–R3 and only ~85 s after the antagonist appears.
+- **Total unresponsiveness.** By t ≈ 400 s the DB stops responding to any query. Throughput reads zero for the remaining 2300 s of the run. `pg_stat_user_tables` counters, `pg_relation_size` outputs, and the queue-depth probe all freeze at their t = 400 s values.
+
+Reaching this needed two rounds of implementation fixes before the mechanism itself could be observed. The first attempt used `DETACH PARTITION ... CONCURRENTLY` and deadlocked at t = 674 s because the concurrent detach's second phase parks on any snapshot older than its "detach-pending" mark, and the antagonist's REPEATABLE READ snapshot never completes; while parked it held `AccessExclusive` on the partition, blocking every worker whose plan touched it. The second attempt used direct `DROP TABLE` on the child and slow-died as the tick loop's inline `SELECT count(*)` degraded on the partitioned layout under bloat. Both failures are archived under `results/M3-attempt*.csv`.
+
+The final run isolates the real M3 result: under a held xmin horizon, three cache-line-hot lock domains compete on the partition tree worker scans, blocked autovacuum, and the sweeper's `DROP TABLE`. `DROP` needs `AccessExclusive` on parent and partition; autovacuum holds `ShareUpdateExclusive` on partitions it cannot finish (because the antagonist snapshot prevents dead-tuple reclamation); worker `SKIP LOCKED` traffic holds `RowShare`. The `lock_timeout` guard on the sweeper lets it back off, but the interaction with wraparound-avoiding autovacuum on frozen-xmin partitions locks the parent tree hard enough that even `pg_stat_activity`-facing queries stop returning. Partition drop as an in-band mitigation to a queue actively serving a saturated workload is, for this configuration, worse than doing nothing.
+
+Ways M3 could still be salvaged and are worth trying as follow-ups: run the sweeper only when `pg_stat_activity` reports no long-running xmin holders; move `DROP` to a separate role with priority; disable autovacuum on the partitions since the sweep discards them anyway. None of those are on the current path M4 (append-only claim log) sidesteps the whole lock domain by construction.
 
 ## How to run
 

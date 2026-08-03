@@ -1,0 +1,12 @@
+{
+  "run_id": "M3",
+  "config": "saturated",
+  "mitigation": "M3",
+  "antagonist_start_seconds": 300,
+  "duration_seconds": 2700,
+  "baseline_throughput_median": 1304.033,
+  "t_50": 375,
+  "t_25": 384,
+  "final_ratio": 0.0000,
+  "collapse_declared": true
+}
