@@ -19,20 +19,33 @@ public final class MetricsCollector implements AutoCloseable {
      across all backends. The last one is the death-spiral signal — when the
      antagonist pins the xmin horizon, its age grows unbounded while
      autovacuum's dead-tuple reclaim stalls.
+
+     Uses pg_partition_tree so the same query works for both the flat table
+     (single row: the parent) and the M3 partitioned layout (one row per
+     partition plus the empty parent). Sums heap and index bytes across the
+     tree; tuple counts and autovacuum stats come from pg_stat_user_tables
+     joined on the same oid list.
      */
     private static final String SAMPLE_SQL = """
+            WITH tree AS (
+              SELECT 'pgqueue.jobs'::regclass AS relid
+              UNION ALL
+              SELECT c.oid
+                FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+               WHERE i.inhparent = 'pgqueue.jobs'::regclass
+            )
             SELECT
-              s.n_live_tup,
-              s.n_dead_tup,
-              pg_relation_size('pgqueue.jobs')            AS table_bytes,
-              pg_indexes_size('pgqueue.jobs')             AS index_bytes,
-              s.last_autovacuum,
-              s.autovacuum_count,
+              COALESCE(SUM(s.n_live_tup), 0)::bigint              AS n_live_tup,
+              COALESCE(SUM(s.n_dead_tup), 0)::bigint              AS n_dead_tup,
+              COALESCE(SUM(pg_relation_size(t.relid)), 0)::bigint AS table_bytes,
+              COALESCE(SUM(pg_indexes_size(t.relid)), 0)::bigint  AS index_bytes,
+              MAX(s.last_autovacuum)                              AS last_autovacuum,
+              COALESCE(SUM(s.autovacuum_count), 0)::bigint        AS autovacuum_count,
               (SELECT COALESCE(MAX(age(backend_xmin)), 0)
                  FROM pg_stat_activity
-                WHERE backend_xmin IS NOT NULL)           AS oldest_xmin_age
-              FROM pg_stat_user_tables s
-             WHERE s.schemaname = 'pgqueue' AND s.relname = 'jobs'
+                WHERE backend_xmin IS NOT NULL)                   AS oldest_xmin_age
+              FROM tree t
+              LEFT JOIN pg_stat_user_tables s ON s.relid = t.relid
             """;
 
     private final DataSource ds;

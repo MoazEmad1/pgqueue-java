@@ -3,11 +3,11 @@ package dev.pgqueue;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongSupplier;
 
 public final class LoadGenerator implements AutoCloseable {
 
@@ -43,10 +43,10 @@ public final class LoadGenerator implements AutoCloseable {
      the update path, not from INSERT.
      */
     public static LoadGenerator saturated(
-            DataSource ds, int targetBacklog, int payloadBytes, Duration checkInterval) {
+            DataSource ds, LongSupplier pendingCount,
+            int targetBacklog, int payloadBytes, Duration checkInterval) {
         return new LoadGenerator(() -> {
-            long pending = countPending(ds);
-            long deficit = targetBacklog - pending;
+            long deficit = targetBacklog - pendingCount.getAsLong();
             if (deficit > 0) bulkInsert(ds, (int) deficit, payloadBytes);
         }, checkInterval.toNanos());
     }
@@ -78,16 +78,6 @@ public final class LoadGenerator implements AutoCloseable {
                 ps.addBatch();
             }
             ps.executeBatch();
-        }
-    }
-
-    private static long countPending(DataSource ds) throws SQLException {
-        try (Connection c = ds.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT count(*) FROM pgqueue.jobs WHERE state = 'pending'");
-             ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            return rs.getLong(1);
         }
     }
 

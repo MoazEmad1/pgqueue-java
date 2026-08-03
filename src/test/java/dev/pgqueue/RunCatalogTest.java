@@ -6,8 +6,10 @@ import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RunCatalogTest {
 
@@ -17,10 +19,48 @@ class RunCatalogTest {
         assertEquals("C1", p.runId());
         assertEquals("saturated", p.configName());
         assertNull(p.antagonistStart(), "C1 is the control — no antagonist");
-        assertNull(p.mitigation());
+        assertNull(p.mitigationName());
+        assertInstanceOf(Mitigation.None.class, p.mitigation());
         Workload.Saturated s = assertInstanceOf(Workload.Saturated.class, p.workload());
         assertEquals(50_000, s.targetBacklog());
         assertEquals(20, p.workers());
+    }
+
+    @Test
+    void m1AppliesAggressiveAutovacuumDdlWithAntagonist() {
+        RunPlan p = RunCatalog.plan("M1", Duration.ofMinutes(45));
+        assertEquals("M1", p.mitigationName());
+        assertEquals(Duration.ofMinutes(5), p.antagonistStart());
+        Mitigation.TableAlter m = assertInstanceOf(Mitigation.TableAlter.class, p.mitigation());
+        assertNotNull(m.ddl());
+        String ddl = String.join("\n", m.ddl());
+        assertTrue(ddl.contains("autovacuum_vacuum_scale_factor"),
+                "M1 DDL should set scale_factor: " + ddl);
+        assertTrue(ddl.contains("autovacuum_vacuum_cost_delay"));
+        assertTrue(ddl.contains("autovacuum_vacuum_cost_limit"));
+    }
+
+    @Test
+    void m2AppliesFillfactorDdlWithAntagonist() {
+        RunPlan p = RunCatalog.plan("M2", Duration.ofMinutes(45));
+        assertEquals("M2", p.mitigationName());
+        assertEquals(Duration.ofMinutes(5), p.antagonistStart());
+        Mitigation.TableAlter m = assertInstanceOf(Mitigation.TableAlter.class, p.mitigation());
+        String ddl = String.join("\n", m.ddl());
+        assertTrue(ddl.contains("fillfactor = 70"), "M2 DDL should set fillfactor=70: " + ddl);
+    }
+
+    @Test
+    void m3AppliesPartitionDropWithSweeperCadence() {
+        RunPlan p = RunCatalog.plan("M3", Duration.ofMinutes(45));
+        assertEquals("M3", p.mitigationName());
+        assertEquals(Duration.ofMinutes(5), p.antagonistStart());
+        Mitigation.PartitionDrop m =
+                assertInstanceOf(Mitigation.PartitionDrop.class, p.mitigation());
+        assertEquals(Duration.ofSeconds(60), m.partitionWidth());
+        assertEquals(Duration.ofSeconds(60), m.sweepInterval());
+        assertTrue(m.futureCount() >= 5,
+                "need at least 5 future partitions of runway: " + m.futureCount());
     }
 
     @Test

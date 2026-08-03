@@ -5,7 +5,7 @@ import java.time.Duration;
 public record RunPlan(
         String runId,
         Workload workload,
-        String mitigation,
+        Mitigation mitigation,
         Duration duration,
         Duration antagonistStart,
         int workers,
@@ -18,5 +18,9 @@ public record RunPlan(
             case Workload.Saturated s -> "saturated";
             case Workload.OpenLoop  o -> "open_loop";
         };
+    }
+
+    public String mitigationName() {
+        return mitigation == null ? null : mitigation.name();
     }
 }

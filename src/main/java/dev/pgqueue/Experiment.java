@@ -3,9 +3,6 @@ package dev.pgqueue;
 import javax.sql.DataSource;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
@@ -28,14 +25,19 @@ public final class Experiment {
         try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
             st.execute("TRUNCATE pgqueue.jobs RESTART IDENTITY");
         }
+        Mitigation mitigation = plan.mitigation() == null ? Mitigation.NONE : plan.mitigation();
+        mitigation.setup(ds);
 
         PgJobQueue queue = new PgJobQueue(ds);
         AtomicReference<MetricsSample> latest = new AtomicReference<>();
         WorkloadStats stats = new WorkloadStats();
 
-        try (MetricsCollector metrics = new MetricsCollector(
+        try (AutoCloseable mitigationHandle = mitigation.start(ds);
+             MetricsCollector metrics = new MetricsCollector(
                     ds, java.time.Duration.ofMillis(500), latest::set);
-             LoadGenerator load = openLoadGenerator(ds, queue, plan);
+             QueueDepthProbe queueDepth = new QueueDepthProbe(
+                    ds, java.time.Duration.ofMillis(500));
+             LoadGenerator load = openLoadGenerator(ds, queue, queueDepth, plan);
              WorkerLoop workers = new WorkerLoop(
                     queue, plan.workers(), plan.idleBackoff(),
                     job -> {
@@ -47,6 +49,7 @@ public final class Experiment {
              ResultsCsv csv = ResultsCsv.forRun(resultsDir, plan.runId())) {
 
             metrics.start();
+            queueDepth.start();
             load.start();
             workers.start();
 
@@ -72,7 +75,7 @@ public final class Experiment {
                     MetricsSample m = latest.get();
                     WorkloadStats.Snapshot ss = stats.snapshotAndReset();
                     csv.append(new RunSample(
-                            plan.runId(), t, plan.configName(), plan.mitigation(),
+                            plan.runId(), t, plan.configName(), plan.mitigationName(),
                             antagonist != null,
                             ss.completedInWindow(),
                             ss.claimP50Ms(), ss.claimP95Ms(), ss.claimP99Ms(),
@@ -81,7 +84,7 @@ public final class Experiment {
                             m == null ? 0 : m.liveTuples(),
                             m == null ? 0 : m.tableBytes(),
                             m == null ? 0 : m.indexBytes(),
-                            countPending(ds),
+                            queueDepth.latest(),
                             m == null ? 0 : m.oldestXminAge(),
                             m == null ? null : m.lastAutovacuum()
                     ));
@@ -92,25 +95,15 @@ public final class Experiment {
         }
     }
 
-    private static LoadGenerator openLoadGenerator(DataSource ds, JobQueue queue, RunPlan plan) {
+    private static LoadGenerator openLoadGenerator(
+            DataSource ds, JobQueue queue, QueueDepthProbe queueDepth, RunPlan plan) {
         return switch (plan.workload()) {
             case Workload.Saturated s ->
-                    LoadGenerator.saturated(ds, s.targetBacklog(), plan.payloadBytes(), s.checkInterval());
+                    LoadGenerator.saturated(ds, queueDepth::latest,
+                            s.targetBacklog(), plan.payloadBytes(), s.checkInterval());
             case Workload.OpenLoop o ->
                     LoadGenerator.openLoop(queue, o.ratePerSec(), plan.payloadBytes());
         };
-    }
-
-    private static long countPending(DataSource ds) {
-        try (Connection c = ds.getConnection();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT count(*) FROM pgqueue.jobs WHERE state = 'pending'");
-             ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            return rs.getLong(1);
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     private Experiment() {}

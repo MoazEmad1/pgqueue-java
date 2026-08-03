@@ -45,7 +45,7 @@ class ExperimentTest {
         RunPlan plan = new RunPlan(
                 "smoke",
                 new Workload.Saturated(200, Duration.ofMillis(100)),
-                null,
+                Mitigation.NONE,
                 Duration.ofSeconds(5),
                 Duration.ofSeconds(2),
                 4,
