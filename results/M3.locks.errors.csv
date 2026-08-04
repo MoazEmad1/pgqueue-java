@@ -1,0 +1,3 @@
+t_seconds,wall_clock,probe_kind,sqlstate,error_kind,message
+2699,2026-08-04T09:08:26.668442Z,fast,08006,connection,An I/O error occurred while sending to the backend.
+2699,2026-08-04T09:08:26.697939Z,slow,08006,connection,An I/O error occurred while sending to the backend.

@@ -54,21 +54,17 @@ class ExperimentTest {
                 64
         );
 
-        Experiment.run(
-                dataSource,
-                () -> {
-                    try {
-                        return DriverManager.getConnection(
-                                POSTGRES.getJdbcUrl(),
-                                POSTGRES.getUsername(),
-                                POSTGRES.getPassword());
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                },
-                dir,
-                plan
-        );
+        java.util.function.Supplier<java.sql.Connection> raw = () -> {
+            try {
+                return DriverManager.getConnection(
+                        POSTGRES.getJdbcUrl(),
+                        POSTGRES.getUsername(),
+                        POSTGRES.getPassword());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+        Experiment.run(dataSource, raw, raw, 4, "worker-not-used-in-test", dir, plan);
 
         Path csv = dir.resolve("smoke.csv");
         assertTrue(Files.exists(csv), "results file should be written");

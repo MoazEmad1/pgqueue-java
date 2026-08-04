@@ -4,9 +4,54 @@
   "mitigation": "M3",
   "antagonist_start_seconds": 300,
   "duration_seconds": 2700,
-  "baseline_throughput_median": 1304.033,
-  "t_50": 375,
-  "t_25": 384,
+  "baseline_throughput_median": 1324.067,
+  "t_50": 549,
+  "t_25": 609,
+  "descent_duration_seconds": 60,
   "final_ratio": 0.0000,
-  "collapse_declared": true
+  "collapse_declared": true,
+  "stale_windows": [
+    {"start_t": 634, "end_t": 649, "duration_s": 15},
+    {"start_t": 650, "end_t": 666, "duration_s": 16},
+    {"start_t": 667, "end_t": 2699, "duration_s": 2032}
+  ],
+  "collector_environment": {
+    "startup": {
+      "postgres_version": "PostgreSQL 17.2 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit",
+      "collector_role": "pgqueue",
+      "worker_role": "worker",
+      "roles_distinct": true,
+      "is_superuser": true,
+      "has_pg_use_reserved_connections": true,
+      "max_connections": 300,
+      "reserved_connections": 0,
+      "superuser_reserved_connections": 5,
+      "hikari_pool_max": 24
+    },
+    "session_settings": {
+      "lock_timeout_ms": 500,
+      "idle_in_transaction_session_timeout_ms": 500,
+      "default_transaction_read_only": true,
+      "fast": {
+        "statement_timeout_ms": 300,
+        "poll_interval_ms": 500,
+        "reasoning": "fast probe: 500 ms poll, 300 ms statement_timeout. Query touches pg_locks + pg_stat_activity + pg_class + pg_namespace only, no per-row functions; expected < 30 ms even under M3 freeze. 500 ms cadence chosen to give >= 18 samples inside M3's 9 s descent. Recalibrate from results/<runId>.locks.probe.csv (rows where probe_kind = 'fast') after first real M3 run."
+      },
+      "slow": {
+        "statement_timeout_ms": 1500,
+        "poll_interval_ms": 2000,
+        "reasoning": "slow probe: 2 s poll, 1500 ms statement_timeout. Query includes pg_blocking_pids(l.pid) which is evaluated per lock row and gets expensive under contention. Conservative pre-calibration. Recalibrate from results/<runId>.locks.probe.csv (rows where probe_kind = 'slow') after first real M3 run."
+      }
+    },
+    "postgres_conf_drift": {
+      "detected": false,
+      "message": null
+    },
+    "runtime": {
+      "disconnected_seconds_total": 0,
+      "fast_query_timeout_count": 0,
+      "slow_query_timeout_count": 0,
+      "reconnect_count": 0
+    }
+  }
 }

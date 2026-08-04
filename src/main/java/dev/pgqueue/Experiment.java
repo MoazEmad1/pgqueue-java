@@ -18,6 +18,9 @@ public final class Experiment {
     public static void run(
             DataSource ds,
             Supplier<Connection> antagonistConnectionFactory,
+            Supplier<Connection> lockCollectorConnectionFactory,
+            int hikariPoolMax,
+            String workerRoleName,
             Path resultsDir,
             RunPlan plan
     ) throws Exception {
