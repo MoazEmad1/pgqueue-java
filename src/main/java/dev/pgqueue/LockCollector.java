@@ -168,6 +168,12 @@ public final class LockCollector implements AutoCloseable {
     private final Probe slowProbe;
 
     private volatile boolean running;
+    /* Set true by close() before interrupt() so any SQLException raised by
+       the interrupt hitting a blocked JDBC read is classified as
+       error_kind=shutdown rather than connection. Keeps
+       disconnected_seconds_total literally-true zero when the only errors
+       are teardown-caused. */
+    private volatile boolean shuttingDown;
     private Thread fastThread;
     private Thread slowThread;
 
@@ -177,6 +183,7 @@ public final class LockCollector implements AutoCloseable {
     private String driftMessage;
     private final AtomicLong disconnectedMillisTotal = new AtomicLong();
     private final AtomicInteger reconnectAttempts = new AtomicInteger();
+    private final AtomicInteger shutdownErrorCount = new AtomicInteger();
 
     public LockCollector(Supplier<Connection> connectionFactory, Path resultsDir,
                          String runId, Instant runStart,
@@ -285,9 +292,13 @@ public final class LockCollector implements AutoCloseable {
             }
             probe.onSuccess();
         } catch (SQLException e) {
-            String kind = classify(e);
+            String kind = shuttingDown ? "shutdown" : classify(e);
             appendError(probe.kind, kind, e);
-            if (isTimeoutKind(kind)) {
+            if (kind.equals("shutdown")) {
+                shutdownErrorCount.incrementAndGet();
+                // Do not credit shutdown as runtime disconnect: the socket
+                // going away was caused by our own close(), not by Postgres.
+            } else if (isTimeoutKind(kind)) {
                 probe.queryTimeoutCount.incrementAndGet();
                 // Connection is fine — Postgres just cancelled that statement.
             } else {
@@ -295,9 +306,14 @@ public final class LockCollector implements AutoCloseable {
                 probe.closeConnection();
             }
         } catch (Exception e) {
-            appendError(probe.kind, "other", e);
-            probe.onDisconnect();
-            probe.closeConnection();
+            if (shuttingDown) {
+                appendError(probe.kind, "shutdown", e);
+                shutdownErrorCount.incrementAndGet();
+            } else {
+                appendError(probe.kind, "other", e);
+                probe.onDisconnect();
+                probe.closeConnection();
+            }
         }
     }
 
@@ -455,7 +471,8 @@ public final class LockCollector implements AutoCloseable {
                 + "    \"disconnected_seconds_total\": " + disconnectedSeconds + ",\n"
                 + "    \"fast_query_timeout_count\": " + fastProbe.queryTimeoutCount.get() + ",\n"
                 + "    \"slow_query_timeout_count\": " + slowProbe.queryTimeoutCount.get() + ",\n"
-                + "    \"reconnect_count\": " + Math.max(0, reconnectAttempts.get() - 2) + "\n"
+                + "    \"reconnect_count\": " + Math.max(0, reconnectAttempts.get() - 2) + ",\n"
+                + "    \"shutdown_error_count\": " + shutdownErrorCount.get() + "\n"
                 + "  }\n"
                 + "}\n";
         try {
@@ -475,6 +492,9 @@ public final class LockCollector implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
+        // Set shuttingDown FIRST so any SQLException raised by the
+        // subsequent interrupt() gets classified correctly.
+        shuttingDown = true;
         running = false;
         if (fastThread != null) {
             fastThread.interrupt();
