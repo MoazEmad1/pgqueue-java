@@ -7,6 +7,8 @@
   "baseline_throughput_median": 1326.833,
   "t_50": null,
   "t_25": null,
+  "descent_duration_seconds": null,
   "final_ratio": 0.9513,
-  "collapse_declared": false
+  "collapse_declared": false,
+  "stale_windows": []
 }
