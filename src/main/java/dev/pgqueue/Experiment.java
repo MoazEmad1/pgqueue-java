@@ -28,15 +28,19 @@ public final class Experiment {
         Mitigation mitigation = plan.mitigation() == null ? Mitigation.NONE : plan.mitigation();
         mitigation.setup(ds);
 
-        PgJobQueue queue = new PgJobQueue(ds);
+        JobQueue queue = mitigation.queue(ds);
         AtomicReference<MetricsSample> latest = new AtomicReference<>();
         WorkloadStats stats = new WorkloadStats();
 
+        java.time.Instant runStart = java.time.Instant.now();
         try (AutoCloseable mitigationHandle = mitigation.start(ds);
              MetricsCollector metrics = new MetricsCollector(
                     ds, java.time.Duration.ofMillis(500), latest::set);
              QueueDepthProbe queueDepth = new QueueDepthProbe(
-                    ds, java.time.Duration.ofMillis(500));
+                    queue, java.time.Duration.ofMillis(500));
+             LockCollector locks = new LockCollector(
+                    lockCollectorConnectionFactory, resultsDir, plan.runId(),
+                    runStart, hikariPoolMax, workerRoleName);
              LoadGenerator load = openLoadGenerator(ds, queue, queueDepth, plan);
              WorkerLoop workers = new WorkerLoop(
                     queue, plan.workers(), plan.idleBackoff(),
@@ -50,6 +54,7 @@ public final class Experiment {
 
             metrics.start();
             queueDepth.start();
+            locks.start();
             load.start();
             workers.start();
 

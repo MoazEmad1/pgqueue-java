@@ -11,4 +11,6 @@ public interface JobQueue {
     void complete(long jobId);
 
     void fail(long jobId);
+
+    long pendingCount();
 }

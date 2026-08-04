@@ -1,0 +1,14 @@
+{
+  "run_id": "M4",
+  "config": "saturated",
+  "mitigation": "M4",
+  "antagonist_start_seconds": 300,
+  "duration_seconds": 2700,
+  "baseline_throughput_median": 146.900,
+  "t_50": 1676,
+  "t_25": null,
+  "descent_duration_seconds": null,
+  "final_ratio": 0.4000,
+  "collapse_declared": false,
+  "stale_windows": []
+}

@@ -99,4 +99,17 @@ public final class PgJobQueue implements JobQueue {
             throw new RuntimeException(e);
         }
     }
+
+    @Override
+    public long pendingCount() {
+        try (Connection c = ds.getConnection();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT count(*) FROM pgqueue.jobs WHERE state = 'pending'");
+             ResultSet rs = ps.executeQuery()) {
+            rs.next();
+            return rs.getLong(1);
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
 }

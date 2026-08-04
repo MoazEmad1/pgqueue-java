@@ -1,10 +1,5 @@
 package dev.pgqueue;
 
-import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
@@ -19,14 +14,14 @@ import java.util.concurrent.locks.LockSupport;
  */
 public final class QueueDepthProbe implements AutoCloseable {
 
-    private final DataSource ds;
+    private final JobQueue queue;
     private final Duration interval;
     private final AtomicLong latest = new AtomicLong();
     private Thread thread;
     private volatile boolean running;
 
-    public QueueDepthProbe(DataSource ds, Duration interval) {
-        this.ds = ds;
+    public QueueDepthProbe(JobQueue queue, Duration interval) {
+        this.queue = queue;
         this.interval = interval;
     }
 
@@ -39,12 +34,9 @@ public final class QueueDepthProbe implements AutoCloseable {
         long intervalNanos = interval.toNanos();
         while (running && !Thread.currentThread().isInterrupted()) {
             long next = System.nanoTime() + intervalNanos;
-            try (Connection c = ds.getConnection();
-                 PreparedStatement ps = c.prepareStatement(
-                         "SELECT count(*) FROM pgqueue.jobs WHERE state = 'pending'");
-                 ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) latest.set(rs.getLong(1));
-            } catch (SQLException ignore) {
+            try {
+                latest.set(queue.pendingCount());
+            } catch (Exception ignore) {
                 // transient DB errors must not kill the probe
             }
             long remaining = next - System.nanoTime();

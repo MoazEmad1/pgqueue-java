@@ -64,6 +64,14 @@ class RunCatalogTest {
     }
 
     @Test
+    void m4UsesAppendOnlyLogAndSwapsTheJobQueueImpl() {
+        RunPlan p = RunCatalog.plan("M4", Duration.ofMinutes(45));
+        assertEquals("M4", p.mitigationName());
+        assertEquals(Duration.ofMinutes(5), p.antagonistStart());
+        assertInstanceOf(Mitigation.AppendOnlyLog.class, p.mitigation());
+    }
+
+    @Test
     void r1r2r3ShareParametersAndStartAntagonistAtFiveMinutes() {
         for (String id : new String[] {"R1", "R2", "R3"}) {
             RunPlan p = RunCatalog.plan(id, Duration.ofMinutes(45));

@@ -18,7 +18,8 @@ import java.util.List;
  background work; None and TableAlter have no background work.
  */
 public sealed interface Mitigation
-        permits Mitigation.None, Mitigation.TableAlter, Mitigation.PartitionDrop {
+        permits Mitigation.None, Mitigation.TableAlter,
+                Mitigation.PartitionDrop, Mitigation.AppendOnlyLog {
 
     Mitigation NONE = new None();
 
@@ -27,6 +28,11 @@ public sealed interface Mitigation
     void setup(DataSource ds) throws SQLException;
 
     AutoCloseable start(DataSource ds) throws SQLException;
+
+    /* Which JobQueue implementation to use for this mitigation. Default is
+       the baseline update-in-place queue; M4 overrides to swap in the
+       append-only variant that goes with its schema. */
+    default JobQueue queue(DataSource ds) { return new PgJobQueue(ds); }
 
     record None() implements Mitigation {
         @Override public String name() { return null; }
@@ -84,6 +90,51 @@ public sealed interface Mitigation
             Sweeper s = new Sweeper(ds, partitionWidth, sweepInterval, futureCount);
             s.start();
             return s;
+        }
+    }
+
+    /*
+     M4 — append-only claim log. setup() replaces the flat jobs table with
+     an insert-only variant (no state/claimed_at/done_at columns) and adds
+     pgqueue.claim_log to hold claim + done + failed events. Nothing here
+     is ever UPDATEd, so no MVCC dead tuples are produced by the queue's
+     own operations — the theory M4 is trying to test.
+     */
+    record AppendOnlyLog() implements Mitigation {
+        @Override public String name() { return "M4"; }
+
+        @Override
+        public void setup(DataSource ds) throws SQLException {
+            try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+                st.execute("DROP TABLE pgqueue.jobs");
+                st.execute("""
+                        CREATE TABLE pgqueue.jobs (
+                            id         bigserial   PRIMARY KEY,
+                            payload    bytea       NOT NULL,
+                            created_at timestamptz NOT NULL DEFAULT now()
+                        )
+                        """);
+                st.execute("CREATE INDEX idx_jobs_created_at ON pgqueue.jobs (created_at)");
+                st.execute("""
+                        CREATE TABLE pgqueue.claim_log (
+                            id      bigserial   PRIMARY KEY,
+                            job_id  bigint      NOT NULL,
+                            event   text        NOT NULL,
+                            at      timestamptz NOT NULL DEFAULT now()
+                        )
+                        """);
+                // Partial index serves both the claim query's NOT EXISTS check
+                // and the pending-count subtraction; other events (done, failed)
+                // are only inserted for audit, no queries hit them.
+                st.execute("CREATE INDEX idx_claim_log_claimed "
+                        + "ON pgqueue.claim_log (job_id) WHERE event = 'claimed'");
+            }
+        }
+
+        @Override public AutoCloseable start(DataSource ds) { return () -> {}; }
+
+        @Override public JobQueue queue(DataSource ds) {
+            return new AppendOnlyJobQueue(ds);
         }
     }
 }

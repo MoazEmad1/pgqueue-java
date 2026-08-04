@@ -44,6 +44,14 @@ public final class RunCatalog {
     static final Mitigation M3 = new Mitigation.PartitionDrop(
             Duration.ofSeconds(60), Duration.ofSeconds(60), 5);
 
+    /*
+     Per docs/experiment.md — payload table is insert-only, claim + done
+     state moves to a separate append-only log. Nothing gets UPDATEd, so
+     the queue itself produces no MVCC dead tuples independent of the
+     xmin horizon. Hypothesis: prevents collapse.
+     */
+    static final Mitigation M4 = new Mitigation.AppendOnlyLog();
+
     public static RunPlan plan(String runId, Duration duration) {
         return switch (runId) {
             case "C1" -> saturatedPlan(runId, duration, null, Mitigation.NONE);
@@ -52,6 +60,7 @@ public final class RunCatalog {
             case "M1" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M1);
             case "M2" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M2);
             case "M3" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3);
+            case "M4" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M4);
             default   -> throw new IllegalArgumentException("unknown run id: " + runId);
         };
     }
