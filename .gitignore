@@ -10,3 +10,25 @@ replay_pid*
 *.jfr
 *.hprof
 .env
+
+# --- Lock-collector CSVs: read this before adding another exclusion --------
+# Raw .locks.fast.csv and .locks.slow.csv are huge (fast~150 MiB, slow~42 MiB)
+# per run and stay local. What SHIPS in the repo is a windowed, gzipped
+# extract of each (usually ~150 KiB to ~1 MiB) that fully covers the wedge
+# window and can be inspected by a reader without a rerun.
+#
+# Produce those extracts by running, after each M3-style run:
+#   python scripts/window_locks.py --run <RUN_ID> --from <T> --to <T>
+# which writes results/<RUN_ID>.locks.{slow,fast}.window-<T>-<T>.csv.gz.
+#
+# scripts/plot_locks.py reads the .gz files transparently, so the README's
+# chart and the reproducible chain reconstruction both go through the
+# committed extract, not the raw file. Do NOT add the .gz files here — they
+# are the whole point.
+#
+# The other lock-collector siblings (.locks.probe.csv, .locks.errors.csv,
+# .env.json) are small and MUST stay tracked — they carry the calibration
+# and drift-check data.
+results/*.locks.fast.csv
+results/*.locks.slow.csv
+results/*.locks.*.window-*.csv
