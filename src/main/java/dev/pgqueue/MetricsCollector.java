@@ -28,11 +28,10 @@ public final class MetricsCollector implements AutoCloseable {
      */
     private static final String SAMPLE_SQL = """
             WITH tree AS (
-              SELECT 'pgqueue.jobs'::regclass AS relid
-              UNION ALL
-              SELECT c.oid
-                FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-               WHERE i.inhparent = 'pgqueue.jobs'::regclass
+              SELECT c.oid AS relid
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = 'pgqueue'
+                 AND c.relkind IN ('r', 'p')
             )
             SELECT
               COALESCE(SUM(s.n_live_tup), 0)::bigint              AS n_live_tup,
