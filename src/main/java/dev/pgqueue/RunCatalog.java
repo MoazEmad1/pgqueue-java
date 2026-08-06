@@ -45,6 +45,16 @@ public final class RunCatalog {
             Duration.ofSeconds(60), Duration.ofSeconds(60), 5);
 
     /*
+     Per docs/m3b.md — same schema and sweep cadence as M3, but the
+     sweeper's create path is CREATE-standalone + ATTACH (SUE lock)
+     rather than CREATE ... PARTITION OF (AccessExclusive lock). The
+     drop path is intentionally unchanged; see the prediction block in
+     docs/m3b.md.
+     */
+    static final Mitigation M3B = new Mitigation.PartitionAttach(
+            Duration.ofSeconds(60), Duration.ofSeconds(60), 5);
+
+    /*
      Per docs/experiment.md — payload table is insert-only, claim + done
      state moves to a separate append-only log. Nothing gets UPDATEd, so
      the queue itself produces no MVCC dead tuples independent of the
@@ -60,6 +70,7 @@ public final class RunCatalog {
             case "M1" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M1);
             case "M2" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M2);
             case "M3" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3);
+            case "M3b" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3B);
             case "M4" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M4);
             default   -> throw new IllegalArgumentException("unknown run id: " + runId);
         };

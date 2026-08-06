@@ -111,6 +111,78 @@ class WorkerOwnershipTest {
                         + "before=" + before + " after=" + after);
     }
 
+    /*
+     M3b regression: same ownership invariant, ATTACH-based create path.
+     Deliberately NOT sharing helpers with the M3 method above — the M3
+     method must stay byte-identical so the reproduced M3 artifact is
+     protected from cross-test drift. Repeated setup here is by design.
+     */
+    @Test
+    void m3bSetupAndAttachingSweeperCyclingWorkEntirelyAsWorker() throws Exception {
+        // Whatever prior test ran, pgqueue.jobs is worker-owned (created
+        // either by @BeforeAll's chown or by the previous test's setup()
+        // executing as worker). Mitigation.PartitionAttach.setup() will
+        // DROP + recreate — safe under worker ownership.
+
+        // M3b setup uses AttachingSweeper for ensureFuturePartitions.
+        new Mitigation.PartitionAttach(
+                Duration.ofSeconds(60), Duration.ofSeconds(60), 3)
+                .setup(workerDs);
+
+        assertOwnedByWorker("pgqueue.jobs",
+                "partitioned parent created by worker (M3b setup)");
+        assertOwnedByWorker("pgqueue.jobs_id_seq",
+                "sequence recreated by worker (M3b setup)");
+        int partitions = countPartitions();
+        assertTrue(partitions >= 3,
+                "M3b setup should have ATTACHed >= 3 initial partitions, got "
+                        + partitions);
+        for (String name : partitionNames()) {
+            assertOwnedByWorker("pgqueue." + name,
+                    "partition ATTACHed by AttachingSweeper.ensureFuturePartitions");
+        }
+
+        // Drop path: manufacture one past-boundary partition using the same
+        // 4-step CREATE-standalone + ATTACH sequence, insert a 'done' row so
+        // it qualifies for drop, then run dropCompletedPartitions.
+        long widthSec = 60;
+        long nowFloor = (java.time.Instant.now().getEpochSecond() / widthSec) * widthSec;
+        long past = nowFloor - 2 * widthSec;
+        String name = AttachingSweeper.PARTITION_PREFIX + past;
+        String lo = java.time.OffsetDateTime.ofInstant(
+                java.time.Instant.ofEpochSecond(past), java.time.ZoneOffset.UTC).toString();
+        String hi = java.time.OffsetDateTime.ofInstant(
+                java.time.Instant.ofEpochSecond(past + widthSec), java.time.ZoneOffset.UTC).toString();
+        try (Connection c = workerDs.getConnection(); Statement st = c.createStatement()) {
+            st.execute("CREATE TABLE pgqueue." + name
+                    + " (LIKE pgqueue.jobs INCLUDING DEFAULTS INCLUDING CONSTRAINTS)");
+            st.execute("ALTER TABLE pgqueue." + name
+                    + " ADD CONSTRAINT " + name + "_bound_check "
+                    + "CHECK (created_at >= TIMESTAMP WITH TIME ZONE '" + lo + "' "
+                    + "  AND created_at <  TIMESTAMP WITH TIME ZONE '" + hi + "')");
+            st.execute("CREATE INDEX " + name + "_state_created_at_idx ON pgqueue."
+                    + name + " (state, created_at)");
+            st.execute("ALTER TABLE pgqueue.jobs ATTACH PARTITION pgqueue." + name
+                    + " FOR VALUES FROM (TIMESTAMP WITH TIME ZONE '" + lo + "') "
+                    + "TO (TIMESTAMP WITH TIME ZONE '" + hi + "')");
+            String rowTs = java.time.OffsetDateTime.ofInstant(
+                    java.time.Instant.ofEpochSecond(past + 5), java.time.ZoneOffset.UTC).toString();
+            st.execute("INSERT INTO pgqueue.jobs (payload, state, created_at) "
+                    + "VALUES ('\\x00'::bytea, 'done', TIMESTAMP WITH TIME ZONE '" + rowTs + "')");
+        }
+        assertOwnedByWorker("pgqueue." + name,
+                "past-boundary partition ATTACHed directly by worker");
+
+        AttachingSweeper sweeper = new AttachingSweeper(
+                workerDs, Duration.ofSeconds(60), Duration.ofSeconds(60), 3);
+        int before = countPartitions();
+        sweeper.dropCompletedPartitions();
+        int after = countPartitions();
+        assertTrue(after < before,
+                "worker should have dropped at least one past all-done partition "
+                        + "via AttachingSweeper; before=" + before + " after=" + after);
+    }
+
     private void forcePastAllDonePartition(Sweeper sweeper) throws Exception {
         long widthSec = 60;
         long nowFloor = (java.time.Instant.now().getEpochSecond() / widthSec) * widthSec;

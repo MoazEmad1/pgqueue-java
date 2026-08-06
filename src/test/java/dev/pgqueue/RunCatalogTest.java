@@ -64,6 +64,19 @@ class RunCatalogTest {
     }
 
     @Test
+    void m3bAppliesPartitionAttachWithSweeperCadence() {
+        RunPlan p = RunCatalog.plan("M3b", Duration.ofMinutes(45));
+        assertEquals("M3b", p.mitigationName());
+        assertEquals(Duration.ofMinutes(5), p.antagonistStart());
+        Mitigation.PartitionAttach m =
+                assertInstanceOf(Mitigation.PartitionAttach.class, p.mitigation());
+        assertEquals(Duration.ofSeconds(60), m.partitionWidth());
+        assertEquals(Duration.ofSeconds(60), m.sweepInterval());
+        assertTrue(m.futureCount() >= 5,
+                "need at least 5 future partitions of runway: " + m.futureCount());
+    }
+
+    @Test
     void m4UsesAppendOnlyLogAndSwapsTheJobQueueImpl() {
         RunPlan p = RunCatalog.plan("M4", Duration.ofMinutes(45));
         assertEquals("M4", p.mitigationName());
