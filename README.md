@@ -37,6 +37,9 @@ Death spiral reproduced across R1–R3 — all three runs collapsed with the sam
 - [x] Analyzer computing `B`, `t_50`, `t_25`, `final_ratio`, and collapse verdict into `results/<run-id>.meta.json`
 - [x] **C1 control run** — 45 min saturated, no antagonist. `B = 1326.83 jobs/sec`, `final_ratio = 0.95`, collapse not declared. The experiment is valid to run.
 - [x] **R1–R3 reproduction** — all three declared collapse. See table below.
+- [ ] **C2 open-loop control** — spec'd in [`docs/experiment.md`](docs/experiment.md), not run. Blocked on the analyzer implementing Criterion B (queue-depth monotonic growth for 300 consecutive seconds with positive linear-regression slope); the open-loop workload path itself already ships. Not scheduled.
+- [ ] **R4 open-loop reproduction** — spec'd, not run. Same Criterion-B blocker as C2. Not scheduled.
+- [ ] **X1 causal control** — spec'd (`idle_in_transaction_session_timeout` set so the antagonist is forcibly rolled back mid-run, demonstrating throughput recovers once the xmin horizon releases). Not run. Blocked on wiring the timeout at antagonist-connection level and labelling the run as a control (not a mitigation) in CSV / meta.json.
 - [ ] Mitigations, measured one at a time (M1–M5, per spec) — **M1, M2, M3 complete, none prevent collapse; M3 collapses harder than the baseline**
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
