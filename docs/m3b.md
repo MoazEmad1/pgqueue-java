@@ -77,14 +77,6 @@ Consequences for a full-length M3b run:
   `AccessExclusive` DROPs are granted; the accumulated partitions clear in
   one sweep tick.
 
-## Prediction
-
-M3b prevents the collapse observed in M3. `t_50` and `t_25` should both be
-`never`. Storage grows like R1–R3 under the antagonist window; the mitigation
-value is throughput preservation, not storage reclamation. Formal comparison:
-lock graph should contain no rows where a worker `UPDATE` is `blocked_by` a
-Sweeper `ATTACH` or `CREATE PARTITION`.
-
 ## What could still block M3b
 
 - **Concurrent Sweeper ATTACHes on the same parent.** `ShareUpdateExclusive`
@@ -206,12 +198,54 @@ outcome sit side by side in git.
   M3b shows the periodic DROP-path throughput dip predicted above,
   that becomes clean evidence for a follow-up M3c rather than a
   confound of M3b.
-- **Honest caveat on any future M3c.** `results/M3-attempt1.csv` shows
-  the first M3 attempt used CONCURRENT DETACH and wedged at t = 674 s.
-  The root cause was not a lock conflict but the concurrent detach's
-  second phase, which waits for any snapshot older than the
-  "detach-pending" mark to complete — the antagonist's `REPEATABLE
-  READ` snapshot never does. Naïve M3c would inherit this exact
-  failure. A real M3c would need a variant that does not wait for
-  old snapshots (e.g., abandon the detach after a grace period, or
-  archive the partition to a separate schema instead of dropping).
+- **Caveat on any future M3c — INFERENCE, not observation.** The claim
+  circulating in this repo is that the first M3 attempt used CONCURRENT
+  DETACH and wedged at t ≈ 674 s because the concurrent detach's second
+  phase waits for any snapshot older than the "detach-pending" mark to
+  complete, and the antagonist's `REPEATABLE READ` snapshot never does.
+  If true, naïve M3c inherits this exact failure.
+
+  What actually exists:
+  - `results/M3-attempt1.csv` — workload CSV, shows a wedge to zero
+    throughput after t ≈ 700 s (`t_25 = 681`). Consistent with any
+    sweeper-side wedge; not diagnostic on its own.
+  - `results/M3-attempt1.meta.json` — derived from the above.
+  - Git commit `3d49de7` message asserts DETACH CONCURRENTLY was tried
+    and reverted with the phase-2-snapshot-wait reasoning above; the
+    DETACH-CONCURRENTLY code itself was never committed (fixed before
+    the first commit of the M3 code).
+
+  What is missing:
+  - No `M3-attempt1.locks.*`, `env.json`, `probe.csv` — the attempt
+    predates the LockCollector (Aug 2 vs Aug 3).
+  - No lock-graph row showing the sweeper parked in the second phase
+    waiting on the antagonist's snapshot.
+
+  Classification: the claim is a **plausible inference from Postgres
+  documentation + the workload CSV + the commit-message narrative**,
+  not a direct observation. Do not read it as a result. Anyone building
+  M3c should either re-run M3-attempt1 with the LockCollector attached
+  to confirm or falsify the phase-2 hypothesis first, or design M3c
+  around the snapshot-wait risk regardless.
+
+## Open questions
+
+- **Does `DETACH PARTITION … CONCURRENTLY`'s second phase actually
+  wait on the antagonist's snapshot?** Currently supported only by
+  Postgres documentation, the workload CSV of `results/M3-attempt1`,
+  and a git commit message narrative. No lock-graph evidence in the
+  repo. Would be settled by re-running M3-attempt1 with the current
+  LockCollector attached and inspecting the sweeper's row in
+  `pg_locks` + `pg_stat_activity` during the wedge for a
+  `wait_event = SnapshotWait`-style signal (or an equivalent).
+- **Under M3b, does autovacuum on the parent ever acquire SUE long
+  enough to queue a sweeper ATTACH?** Prediction section calls this
+  the plausible remaining wedge source. First M3b run's slow-probe CSV
+  should answer it directly: look for `pg_stat_activity` rows belonging
+  to `autovacuum worker` with `mode = ShareUpdateExclusive` on
+  `pgqueue.jobs`, and sweeper rows with `granted = false` and
+  `blocked_by` = that autovacuum PID.
+- **Does the predicted ~2 s DROP stall per 60 s sweep tick actually
+  produce the ~3% throughput dip the arithmetic implies, or does the
+  workload absorb it in slack?** Answer will be in the M3b throughput
+  timeline.

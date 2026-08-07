@@ -101,11 +101,19 @@ def load_rows(csv_path: Path) -> list[dict]:
 
 
 def chain_depth_series(rows: list[dict]) -> dict[int, int]:
+    return _depth_series(rows, WORKLOAD_ROLES)
+
+
+def worker_depth_series(rows: list[dict]) -> dict[int, int]:
+    return _depth_series(rows, {"worker"})
+
+
+def _depth_series(rows: list[dict], roles: set[str]) -> dict[int, int]:
     per_t: dict[int, set[str]] = defaultdict(set)
     for r in rows:
         if not r["blocking_pids"]:
             continue
-        if infer_role(r["query_snippet"], r["state"]) not in WORKLOAD_ROLES:
+        if infer_role(r["query_snippet"], r["state"]) not in roles:
             continue
         per_t[int(r["t_seconds"])].add(r["pid"])
     return {t: len(pids) for t, pids in per_t.items()}
@@ -231,27 +239,44 @@ def draw_chain(ax, nodes, edges, at_t):
               ncol=2)
 
 
-def draw_timeline(ax, depth: dict[int, int], focus_t: int):
-    if not depth:
+def draw_timeline(ax, workload_depth: dict[int, int],
+                  worker_depth: dict[int, int], focus_t: int):
+    """Two step-lines: workload total (workers + load + probes) and
+    workers-only. Distinction is important because the two counts read
+    differently in the M3 record — 21-23 vs 18-20 — and the whole point
+    of publishing this chart is that the workload probes are victims of
+    the same wedge that hits the workers."""
+    if not workload_depth:
         ax.text(0.5, 0.5, "no workload PIDs blocked in this file",
                 ha="center", va="center", transform=ax.transAxes)
         return
-    ts = sorted(depth.keys())
-    ys = [depth[t] for t in ts]
-    ax.step(ts, ys, where="post", color="#1565c0", linewidth=1.4)
-    ax.fill_between(ts, ys, step="post", alpha=0.2, color="#1565c0")
+
+    def _plot(depth, color, label):
+        ts = sorted(depth.keys())
+        ys = [depth[t] for t in ts]
+        ax.step(ts, ys, where="post", color=color, linewidth=1.4, label=label)
+        ax.fill_between(ts, ys, step="post", alpha=0.15, color=color)
+
+    _plot(workload_depth, "#1565c0", "workload total (worker + load + probes)")
+    _plot(worker_depth, "#ef6c00", "workers only")
+
     ax.axvline(focus_t, color="black", linestyle=":", alpha=0.7)
-    ymax = max(ys)
+    ys_all = list(workload_depth.values())
+    ymax = max(ys_all)
     ax.set_ylim(0, ymax * 1.15 if ymax else 1)
     ax.text(focus_t + 4, ymax * 0.9, f"t={focus_t}", fontsize=8, color="black")
     ax.set_xlabel("t_seconds")
-    ax.set_ylabel("workload PIDs blocked")
+    ax.set_ylabel("PIDs blocked")
+
+    ys_workers = list(worker_depth.values()) or [0]
     ax.set_title(
-        f"chain depth: workload PIDs (worker + load + probes) with "
-        f"pg_blocking_pids non-empty — n={len(ts)} samples, "
-        f"min={min(ys)}, max={ymax}",
-        fontsize=10)
+        f"chain depth (pg_blocking_pids non-empty) — "
+        f"n={len(workload_depth)} samples · "
+        f"workload total min={min(ys_all)} max={ymax} · "
+        f"workers-only min={min(ys_workers)} max={max(ys_workers)}",
+        fontsize=9)
     ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
 
 
 def main(argv):
@@ -266,7 +291,8 @@ def main(argv):
         args.out = args.csv.parent / f"{stem}.locks.chain-at-{args.at}.png"
 
     rows = load_rows(args.csv)
-    depth = chain_depth_series(rows)
+    workload_depth = chain_depth_series(rows)
+    worker_depth = worker_depth_series(rows)
     snap = snapshot(rows, args.at)
     if not snap:
         print(f"no rows at t={args.at} in {args.csv}", file=sys.stderr)
@@ -277,7 +303,7 @@ def main(argv):
         2, 1, figsize=(15, 9),
         gridspec_kw={"height_ratios": [1, 4]}
     )
-    draw_timeline(ax_top, depth, args.at)
+    draw_timeline(ax_top, workload_depth, worker_depth, args.at)
     draw_chain(ax_bot, nodes, edges, args.at)
     fig.tight_layout()
     fig.savefig(args.out, dpi=140)
