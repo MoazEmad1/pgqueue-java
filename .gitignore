@@ -31,5 +31,8 @@ replay_pid*
 # and drift-check data.
 results/*.locks.fast.csv
 results/*.locks.slow.csv
-results/*.locks.*.window-*.csv__pycache__/
+results/*.locks.*.window-*.csv
+
+# Python bytecode from scripts/*.py
+__pycache__/
 *.pyc

@@ -1,0 +1,6 @@
+t_seconds,wall_clock,probe_kind,sqlstate,error_kind,message
+2160,2026-08-07T12:35:09.328663Z,fast,57014,timeout,ERROR: canceling statement due to statement timeout
+2170,2026-08-07T12:35:18.597638Z,fast,57014,timeout,ERROR: canceling statement due to statement timeout
+2280,2026-08-07T12:37:08.797165Z,fast,57014,timeout,ERROR: canceling statement due to statement timeout
+2699,2026-08-07T12:44:07.787177Z,fast,08006,shutdown,An I/O error occurred while sending to the backend.
+2699,2026-08-07T12:44:07.787769Z,slow,08006,shutdown,An I/O error occurred while sending to the backend.

@@ -41,6 +41,7 @@ Death spiral reproduced across R1–R3 — all three runs collapsed with the sam
 - [ ] **R4 open-loop reproduction** — spec'd, not run. Same Criterion-B blocker as C2. Not scheduled.
 - [ ] **X1 causal control** — spec'd (`idle_in_transaction_session_timeout` set so the antagonist is forcibly rolled back mid-run, demonstrating throughput recovers once the xmin horizon releases). Not run. Blocked on wiring the timeout at antagonist-connection level and labelling the run as a control (not a mitigation) in CSV / meta.json.
 - [ ] Mitigations, measured one at a time (M1–M5, per spec) — **M1, M2, M3 complete, none prevent collapse; M3 collapses harder than the baseline**
+- [x] **M3b (out-of-spec variant, see [`docs/m3b.md`](docs/m3b.md))** — SUE-mode ATTACH sweeper. Confirms the ATTACH-fixes-CREATE hypothesis (0 ATTACH rows blocked across 2700 s). Still collapses via the intentionally-unchanged DROP path plus R1-shape dead-tuple bloat. `t_50 = 497 s`, earlier than M3's 549 s.
 - [ ] Queue feature surface: retries with backoff, visibility timeout, DLQ, priorities, dedup
 - [ ] Adapter for the public Postgres queue benchmark harness
 
@@ -95,9 +96,55 @@ The chain: antagonist → sweeper CREATE PARTITION → all workload PIDs.
 
 **The wedge blocks the instrument measuring it.** The stale window in `results/M3.meta.json` covering t = 667 s to t = 2699 s (2032 s of frozen values) is not a database freeze. `results/M3.env.json` shows the `pgqueue` superuser LockCollector — on its own dedicated connection outside the Hikari pool — wrote 5399 fast-probe samples and 1350 slow-probe samples across the whole 2700 s run: `disconnected_seconds_total = 0`, `fast_query_timeout_count = 0`, `slow_query_timeout_count = 0`, `max query_ms = 248 ms` fast, `133 ms` slow, all against `pg_locks` / `pg_stat_activity` / system catalogs. The workload's own observability probes — PID 94 (LoadGenerator INSERT), PID 95 (QueueDepthProbe SELECT count), PID 96 (MetricsCollector aggregation) — are all wedged in the chart above, blocked behind the same sweeper's pending `AccessExclusive` on `pgqueue.jobs`. Because those three probes are the writers into the atomic references that the tick loop reads for the `results/M3.csv` row, their queries not returning after t ≈ 667 s is exactly why every metric column freezes for the rest of the run. The DB stayed responsive; the instrument measuring the workload became one of the workload's own victims.
 
-**Follow-up spec (not run).** `docs/m3b.md` documents an alternative sweeper implementation that creates partitions as standalone tables and then attaches them with `ALTER TABLE … ATTACH PARTITION`, which since PG12 takes `ShareUpdateExclusive` on the parent instead of `AccessExclusive`. That lock mode does not conflict with the antagonist's `AccessShare`, so the CREATE-partition chain observed above should not form. The DROP path remains blocked, so old partitions would accumulate for the antagonist's lifetime; the mitigation value would be throughput preservation, not storage reclamation. Spec sits outside the pre-registered `experiment.md` and awaits explicit approval to run.
-
 **Descent-length note (unresolved, not variance).** An earlier M3 run in this repo showed `descent_duration = 9 s`; this run shows `60 s`. Between them the harness changed in three ways: workload role split (from superuser to non-super `worker`), the LockCollector added two additional superuser connections and per-tick probe queries, and the tick loop's poll and timeout settings changed. Whether the descent length is genuinely stochastic or was moved by one of those config changes is not settled by the current data. A clean answer requires repeat M3 runs at fixed harness config.
+
+### M3b (attach-not-create partition sweeper)
+
+**Result: collapse still declared. Registered prediction partially falsified.** `B = 1341 jobs/sec`, `t_50 = 497 s`, `t_25 = 695 s`, `descent_duration = 198 s`, `final_ratio = 0.0857`. `t_50 = 497 s` is **earlier** than M3's 549 s and R1's 566 s — M3b did not delay collapse; it arrived sooner than the unmitigated baseline.
+
+The full pre-registered prediction is in [`docs/m3b.md`](docs/m3b.md) under "Prediction (registered 2026-08-06, before first run)". Read against the run's `results/M3b.meta.json` and `results/M3b.env.json`:
+
+| claim (from the registered block) | prediction | actual | verdict |
+|-----------------------------------|-----------:|-------:|:-------:|
+| B (jobs/sec)                      | ~1300      | 1341   | ✓ |
+| CREATE/ATTACH path — ATTACH row blocked in the lock graph | 0        | **0 across 11 ATTACH rows in the whole run** | ✓ |
+| CREATE/ATTACH path — worker `UPDATE` blocked_by an ATTACH/CREATE statement | 0        | **0 across 2700 s** | ✓ |
+| `t_50`                            | never      | **497 s** | ✗ |
+| `t_25`                            | never      | **695 s** | ✗ |
+| `final_ratio`                     | > 0.5      | **0.0857** | ✗ |
+| collapse declared                 | no         | **yes** | ✗ |
+| DROP-path periodic stall          | ~2 s per 60 s (~3 % loss) | duty cycle 20–33 % blocked per 60 s bucket, longest observed tick = 22 s | ✗ magnitude very wrong |
+| chain depth = 0 for ≥ 97 % of samples | ≥ 97 %  | ~70 % (workload total oscillates 0–23, workers-only 0–20) | ✗ |
+
+**What was confirmed.** The SUE-mode ATTACH hypothesis is empirically clean. Across the full 2700 s run, blocked queries by verb (from `results/M3b.locks.slow.csv`):
+
+| blocked verb                | count |
+|-----------------------------|------:|
+| `UPDATE` (workers)          | 5554 |
+| `DROP TABLE` (sweeper)      | 379 |
+| `SELECT count(*)` (queue-depth probe) | 359 |
+| `WITH tree AS …` (metrics probe) | 286 |
+| `INSERT INTO pgqueue.jobs` (load generator) | 88 |
+| `ALTER TABLE … ATTACH PARTITION` (sweeper) | **0** |
+| `CREATE TABLE` (standalone) / `ALTER TABLE … ADD CONSTRAINT` / `CREATE INDEX` (sweeper) | **0** |
+
+Every single blocked row is downstream of a `DROP TABLE`. Not one `ATTACH`, `CREATE`, or `ADD CONSTRAINT` was ever observed with `granted = false`. The prediction's core hypothesis — `ATTACH` takes SUE (PG12+) and does not conflict with the antagonist's `AccessShare` on the parent — is exactly what the data shows.
+
+**What was falsified, and why.** Collapse arrived earlier and deeper than predicted. The mechanism is not what the prediction said.
+
+The prediction attributed the residual loss to a periodic DROP-path stall (~2 s per 60 s sweep, ~3 % loss). Two things are wrong with that:
+
+1. **The stall is not brief.** The sweeper's DROPs accumulate. Every 60 s a new partition becomes past-boundary; every sweep tick walks the whole growing list of past-done partitions and attempts `DROP TABLE` on each, each attempt timing out after `lock_timeout = 2 s`. DROP attempts per tick observed in `results/M3b.locks.slow.window-400-1200.csv.gz`: 3, 4, 4, 5, 6, 4, 2, 7, 8, 9, 3, 7, 11. Per-tick wall-clock duration: 4, 6, 6, 8, 10, 6, 2, 12, 14, 16, 4, 12, 22 seconds. Longest observed tick was 22 s in a 60 s interval — the "sweeper never finishes a pass" crossover was **not** reached in the observed window, but the loop is monotonically growing.
+
+2. **Even accounting for the accumulated stall, throughput loss is much larger than the duty cycle predicts.** Per-bucket blocked duty cycle across the wedge is 20–33 %. If the stall were the whole story, throughput per bucket would sit at 67–80 % of baseline. Actual per-bucket average throughput (from `results/M3b.csv`) drops from 1345 tps (pre-antagonist) to 244 tps by t = 720 s — an 82 % loss, not the ≤ 33 % loss the stall alone would predict. The remaining loss is R1-shaped dead-tuple bloat: `n_dead_tup` grows from 142,584 pre-antagonist to 753,535 by t = 1200 s; `oldest_backend_xmin_age` grows at ~57 k per 60 s bucket. Under M3, the sweeper's partition drops kept the dead-tuple population bounded per partition (before the CREATE-wedge hit); under M3b, drops never succeed, so partitions accumulate and dead tuples accumulate within them, and the workload degrades for exactly the reasons R1 degrades.
+
+![M3b DROP-attempt accumulation over time overlaid on throughput decay: DROP attempts per sweep tick grow from 3 to 11 across the wedge window; per-tick wall-clock duration grows from 4 s to 22 s; cumulative distinct partitions ever attempted for DROP grows monotonically to 11 by t = 1200 s. Neither series alone tracks the throughput crater — dead-tuple bloat is the primary driver, sweeper stall is a periodic overlay.](results/M3b.locks.accumulation.png)
+
+Reading in one sentence: **the ATTACH-fixes-CREATE hypothesis is confirmed exactly by the lock graph, but M3b left the DROP path unchanged, and the DROP path plus the R1-style dead-tuple bloat it enables is enough to collapse the workload without ever forming the CREATE-wedge chain that killed M3.**
+
+**Collector under M3b (from `results/M3b.env.json`).** Two-probe collector kept sampling throughout the wedge: `disconnected_seconds_total = 0`, `reconnect_count = 0`, `shutdown_error_count = 2` (both correctly classified — the P.1 shutdown-classification fix works). Fast probe timeouts: **3** (at t = 2160 s, 2170 s, 2280 s) vs M3's **0**. These cluster with elevated `pg_locks` row counts — fast probe `row_count` around those samples runs 1500–2400 vs the M3 typical of ~76; fast probe `max query_ms = 836 ms`, vs M3's 248 ms. The collector's own scan of `pg_locks` slows under sustained lock-table pressure. The 400 ms fast timeout (calibrated from M3's max) is now borderline. Slow probe (2 s poll, 1500 ms timeout) held: `slow_query_timeout_count = 0`, `max query_ms = 887 ms` this run vs M3's 133 ms — 6.7× slower under the same wedge shape but larger `pg_locks` population. Slow probe was still well under its 1500 ms timeout.
+
+**Follow-up.** M3c as sketched in [`docs/m3b.md`](docs/m3b.md) is the obvious next step — CONCURRENT DETACH + DROP-standalone — but the honest caveat in that spec applies: the phase-2 snapshot-wait risk is currently an inference, not an observation, and M3-attempt1's failure mode would apply to a naïve M3c. Settling that requires either re-running M3-attempt1 with the LockCollector attached, or designing M3c around the snapshot-wait risk regardless. Neither is scheduled.
 
 ## How to run
 
