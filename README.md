@@ -200,9 +200,38 @@ python scripts/window_locks.py --run M3 --from 600 --to 1200
 
 Every run resets the DB to a known-empty state so results are reproducible. `PG_URL`, `PG_USER`, `PG_PASSWORD` override the localhost defaults.
 
+## The instrument shares the workload's fate
+
+Every workload-side probe in this harness — the load generator's `INSERT`, the queue-depth probe's `SELECT count(*)`, the metrics collector's aggregation over `pg_stat_user_tables` — runs against the same relations the workload runs against, through the same connection pool, and therefore acquires locks in the same lock domain. When the workload wedges, the probes wedge alongside it. The last value each probe successfully returned is what the tick loop writes into the CSV for as long as the wedge lasts. The failure mode is a **flat line**, which reads as *settled* or *idle*, not as *broken*.
+
+The M3 run makes the point concretely. `results/M3.meta.json` records a `stale_windows` entry for **t = 667 s to t = 2699 s (2032 s)** during which every metric-derived column in `results/M3.csv` holds one identical value:
+
+| column                      | value repeated for 2032 s |
+|-----------------------------|--------------------------:|
+| `throughput`                | `0.000` |
+| `n_dead_tup`                | `483 134` |
+| `n_live_tup`                | `370 261` |
+| `table_bytes`               | `116 219 904` (110.8 MiB) |
+| `index_bytes`               | `34 578 432` (33.0 MiB) |
+| `queue_depth`               | `0` |
+| `oldest_backend_xmin_age`   | `484 099` |
+| `last_autovacuum`           | `2026-08-04T08:33:46.170268Z` |
+
+**Each of these is a real last-good read, not a sentinel written on probe failure.** `QueueDepthProbe.latest` is an `AtomicLong` that is only assigned inside the successful `try` branch of the probe loop; on exception it is unchanged. `throughput` comes from a live `WorkloadStats` reservoir drained per tick — zero means zero jobs completed in the past second. The `queue_depth = 0` is real, and worth naming exactly: the input side had already stalled some seconds earlier. Deriving an implied enqueue rate from `results/M3.csv` as `Δqueue_depth + throughput` gives ≈ 0 across t=580–596 (LoadGenerator not depositing new work) while workers drained the standing 9 181 → 283 backlog at ~570 tps. Hit zero at t=597, freeze fired the tick after. Pre-antagonist LoadGenerator held `qd` near its 50 k target at 1300 tps; here it was silent. The `qd = 0` is partly an input-side artifact — LoadGenerator's bulk `INSERT` had been queued behind the sweeper's pending `AccessExclusive` on the parent for long enough that no new rows landed while workers finished the residual, and the frozen `qd = 0` is the state at exactly that moment.
+
+**The dashboard failure mode this reveals is subtler than "the probes lie".** During those 2032 s, no worker committed an `UPDATE`, no load-generator `INSERT` landed, and no sweeper `DROP` succeeded — nothing that would grow the heap, the index, the dead-tuple count, or the queue depth was able to commit. The frozen values may well have been correct for the actual state of the database throughout. What the flat lines fail to distinguish is not *value moving* from *value not moving* — it is **wedged from idle**. A dashboard user looking at flat rows for dead tuples, table bytes, queue depth, and xmin age would reasonably read "system settled". The system was actually blocked with 20 worker connections plus a load generator plus two probes all queued behind a sweeper that was queued behind the antagonist. Same flat line, opposite operational meaning.
+
+The M3 verdict section further up in this README opens by saying the original diagnosis was "the DB stops responding to any query", and that this was wrong. That mis-diagnosis came from reading exactly the table above — flat rows that looked like *the database stopped*. What actually stopped was the probes that were supposed to describe the database, at exactly the moment the workload wedged, in a way that made "wedged" and "idle" indistinguishable from the CSV alone. The repo's own author fell for it; publishing that we fell for it is the point. A naïve Prometheus/Grafana stack scraping the same probes would have shown the same picture, and the same mis-diagnosis would have been reasonable from a slick dashboard as it was from a stale CSV.
+
+**What actually survived M3.** The `LockCollector`, on a dedicated superuser connection opened via `DriverManager` **outside the Hikari pool**, with `statement_timeout` / `lock_timeout` / `idle_in_transaction_session_timeout` set (300 ms fast probe, 1500 ms slow probe, 500 ms lock and idle) and `default_transaction_read_only = on`. It wrote 5399 fast-probe samples and 1350 slow-probe samples across the full 2700 s M3 run without a single reconnect or timeout — the entire chain-graph evidence that rewrote the M3 section came from that collector, not from the workload probes.
+
+**Design rule.** *Monitoring that shares a connection pool with the workload, or a lock domain with the workload's relations, cannot observe the workload's failure.* Both halves matter. Sharing the pool means the monitor can be starved by pool exhaustion; sharing a lock domain means the monitor's query queues behind the same lock waits the workload is drowning in. Every workload probe in this repo violates both halves by construction — that is what they are for; they measure the workload from its own vantage point. The `LockCollector` violates neither, which is why it is the only instrument in this repo that is trustworthy under a wedge.
+
+**M3b as evidence that the rule is about lock domain, not about probe design.** Same three probes, same tick loop, same code paths — `results/M3b.meta.json` records `stale_windows: []`. Nothing froze. The difference is not that the probes were rewritten; the difference is that under M3b's sweeper (see the M3b section above), each `DROP TABLE` aborts at `lock_timeout = 2 s` instead of holding an ungrantable `AccessExclusive` on the parent for the rest of the run. The probes' queries queue for at most a few seconds at a time, complete, update the atomics the tick loop reads. Same workload probes, same code, same connection pool — no stale window, because no single lock request holds the domain indefinitely. **Removing indefinite lock holds from the workload restored the probes to usefulness without changing anything about the probes themselves.**
+
 ## Stack
 
-Java 21+ (virtual threads), plain JDBC + HikariCP, Flyway, Postgres in Docker, JUnit 5 + Testcontainers. Instrumentation is a hand-rolled per-tick reservoir into CSV; a Micrometer/Prometheus/Grafana path may follow if the harness ever needs live dashboards.
+Java 21+ (virtual threads), plain JDBC + HikariCP, Flyway, Postgres in Docker, JUnit 5 + Testcontainers. Instrumentation is a hand-rolled per-tick reservoir into CSV plus a two-probe `LockCollector` on a dedicated out-of-pool superuser connection. **This split is deliberate, not a placeholder.** A naive Prometheus/Grafana stack scraping the same workload-side probes the tick loop reads would have reproduced M3's 2032 s stale window exactly (see [The instrument shares the workload's fate](#the-instrument-shares-the-workloads-fate) above): every dashboard panel except throughput would have plotted a flat line at the last-known-good value, and the panels would have read as *settled*. The out-of-pool `LockCollector` is the only observability in this repo that survives the wedges it is meant to observe.
 
 No framework in the core library. A Spring Boot starter may follow as a separate module.
 
