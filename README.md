@@ -100,7 +100,14 @@ The chain: antagonist → sweeper CREATE PARTITION → all workload PIDs.
 
 ### M3b (attach-not-create partition sweeper)
 
-**Result: collapse still declared. Registered prediction partially falsified.** `B = 1341 jobs/sec`, `t_50 = 497 s`, `t_25 = 695 s`, `descent_duration = 198 s`, `final_ratio = 0.0857`. `t_50 = 497 s` is **earlier** than M3's 549 s and R1's 566 s — M3b did not delay collapse; it arrived sooner than the unmitigated baseline.
+**Result: collapse still declared. Registered prediction partially falsified. But M3 and M3b are different failure modes — binary wedge vs progressive ratchet — with the same collapse verdict.** `B = 1341 jobs/sec`, `t_50 = 497 s`, `t_25 = 695 s`, `descent_duration = 198 s`, `final_ratio = 0.0857`. `t_50 = 497 s` is **earlier** than M3's 549 s and R1's 566 s — M3b did not even delay collapse; it arrived sooner than the unmitigated baseline.
+
+Two independent corroborations of the wedge-vs-ratchet framing come straight from `results/M3b.meta.json`:
+
+- **`descent_duration_seconds = 198`** (M3 = 60, R1 = 513, R2 = 577, R3 = 695). A progressive ratchet — sweeper stalls piling up over time on top of R1-shape dead-tuple bloat — predicts a slower decay than a single-shot binary wedge that pins the workload at zero. M3b's 198 s sits between M3's cliff (60 s) and the R1-family slow drift (513–695 s), consistent with a slower ratchet than R1 rather than the instant wedge M3 produced.
+- **`stale_windows = []`** (M3 = three windows totalling 2063 s of frozen probes over the run). Under M3 the workload's own metric probes never returned after t ≈ 667 s and every metric column froze; under M3b the same probes ran continuously to end-of-run. Confirmed from `results/M3b.locks.slow.window-400-1200.csv.gz`: the three probe PIDs appear as `blocked_by = <sweeper pid>` only 5.8 %, 14.0 %, and 17.2 % of the samples across the 800 s wedge window — **intermittently**, not continuously. The mechanism explaining the difference: each M3b DROP releases at `lock_timeout = 2 s` instead of holding an ungrantable `AccessExclusive` for the run's remainder as M3's `CREATE ... PARTITION OF` did.
+
+![M3b workload chart: throughput oscillates in a periodic sawtooth pattern from t=300 onward as sweeper DROP stalls fire every ~60s; dead-tuple and index-bytes curves climb smoothly like R1 rather than stepping like M3. No stale-window shading — every metric column keeps updating for the full 2700s run.](results/M3b.png)
 
 The full pre-registered prediction is in [`docs/m3b.md`](docs/m3b.md) under "Prediction (registered 2026-08-06, before first run)". Read against the run's `results/M3b.meta.json` and `results/M3b.env.json`:
 
@@ -130,17 +137,41 @@ The full pre-registered prediction is in [`docs/m3b.md`](docs/m3b.md) under "Pre
 
 Every single blocked row is downstream of a `DROP TABLE`. Not one `ATTACH`, `CREATE`, or `ADD CONSTRAINT` was ever observed with `granted = false`. The prediction's core hypothesis — `ATTACH` takes SUE (PG12+) and does not conflict with the antagonist's `AccessShare` on the parent — is exactly what the data shows.
 
-**What was falsified, and why.** Collapse arrived earlier and deeper than predicted. The mechanism is not what the prediction said.
-
-The prediction attributed the residual loss to a periodic DROP-path stall (~2 s per 60 s sweep, ~3 % loss). Two things are wrong with that:
+**What was falsified, and why.** Collapse arrived earlier and deeper than predicted. Both magnitudes in the DROP-path prediction were wrong.
 
 1. **The stall is not brief.** The sweeper's DROPs accumulate. Every 60 s a new partition becomes past-boundary; every sweep tick walks the whole growing list of past-done partitions and attempts `DROP TABLE` on each, each attempt timing out after `lock_timeout = 2 s`. DROP attempts per tick observed in `results/M3b.locks.slow.window-400-1200.csv.gz`: 3, 4, 4, 5, 6, 4, 2, 7, 8, 9, 3, 7, 11. Per-tick wall-clock duration: 4, 6, 6, 8, 10, 6, 2, 12, 14, 16, 4, 12, 22 seconds. Longest observed tick was 22 s in a 60 s interval — the "sweeper never finishes a pass" crossover was **not** reached in the observed window, but the loop is monotonically growing.
 
-2. **Even accounting for the accumulated stall, throughput loss is much larger than the duty cycle predicts.** Per-bucket blocked duty cycle across the wedge is 20–33 %. If the stall were the whole story, throughput per bucket would sit at 67–80 % of baseline. Actual per-bucket average throughput (from `results/M3b.csv`) drops from 1345 tps (pre-antagonist) to 244 tps by t = 720 s — an 82 % loss, not the ≤ 33 % loss the stall alone would predict. The remaining loss is R1-shaped dead-tuple bloat: `n_dead_tup` grows from 142,584 pre-antagonist to 753,535 by t = 1200 s; `oldest_backend_xmin_age` grows at ~57 k per 60 s bucket. Under M3, the sweeper's partition drops kept the dead-tuple population bounded per partition (before the CREATE-wedge hit); under M3b, drops never succeed, so partitions accumulate and dead tuples accumulate within them, and the workload degrades for exactly the reasons R1 degrades.
+2. **Blocking alone does not explain the throughput loss — and neither does bloat alone. This run cannot cleanly separate the antagonist's snapshot cost, the bloat progression, and the blocking overlay.** Anchors first, then the decisive test.
 
-![M3b DROP-attempt accumulation over time overlaid on throughput decay: DROP attempts per sweep tick grow from 3 to 11 across the wedge window; per-tick wall-clock duration grows from 4 s to 22 s; cumulative distinct partitions ever attempted for DROP grows monotonically to 11 by t = 1200 s. Neither series alone tracks the throughput crater — dead-tuple bloat is the primary driver, sweeper stall is a periodic overlay.](results/M3b.locks.accumulation.png)
+   **Anchors** (all ordinary averages of `throughput` in `results/M3b.csv`, no smoothing):
 
-Reading in one sentence: **the ATTACH-fixes-CREATE hypothesis is confirmed exactly by the lock graph, but M3b left the DROP path unchanged, and the DROP path plus the R1-style dead-tuple bloat it enables is enough to collapse the workload without ever forming the CREATE-wedge chain that killed M3.**
+   - `B = 1341 jobs/sec` from `results/M3b.meta.json` (analyzer's t=120–300 s median of rolling throughput — pre-antagonist).
+   - M3b pre-antagonist steady state (t=200–299 s, strict): **1331 tps** — essentially equal to B. **Partitioning overhead alone is ~0**, not the 45 % an earlier draft of this section claimed. That draft came from an n=1 unblocked sample and was wrong.
+   - C1 same window (t=200–300 s, no antagonist ever): **1324 tps**. Matches C1's `B = 1327`. Consistent — 1300-ish tps is the pre-antagonist baseline for both C1 and M3b.
+   - M3b at t=300–400 s (all samples, transient): 1192 tps average — a 10 % drop within 100 s of the antagonist firing.
+
+   **Decisive test.** Partition `M3b.csv` rows by whether the nearest 2 s slow-probe sample recorded any blocked workload PID, then compare unblocked-sample vs blocked-sample average throughput per 200 s post-antagonist bucket:
+
+   | bucket t (s) | unblocked avg (n)      | blocked avg (n)        |
+   |-------------:|-----------------------:|-----------------------:|
+   | 400–600      | **677 tps (n=144)**    | 274 tps (n=56)         |
+   | 600–800      | 319 tps (n=118)        | 202 tps (n=82)         |
+   | 800–1000     | 275 tps (n=98)         | 187 tps (n=102)        |
+   | 1000–1200    | **241 tps (n=88)**     | 137 tps (n=112)        |
+
+   Three signals contribute and cannot be separated by this run alone:
+
+   - **Antagonist snapshot alone (early wedge, bloat still minimal):** unblocked throughput 677 tps in t=400–600 s — **~50 % loss vs baseline 1341** with the workload still doing lock-free work in those samples. Something about the antagonist's REPEATABLE READ snapshot on the parent partitioned table costs half the throughput even when no lock is contended.
+   - **Bloat progression (unblocked-window trajectory across the run):** 677 → 241 tps between t=400–600 and t=1000–1200 — the drop happens without any blocking events being recorded. `n_dead_tup` grew from 142,584 pre-antagonist to 753,535 by t=1200 s; `oldest_backend_xmin_age` at ~57 k per 60 s bucket. Consistent with dead-tuple accumulation making the claim path progressively slower, as in R1.
+   - **Blocking overlay:** blocked-sample throughput sits ~40–60 % below same-bucket unblocked throughput across all four buckets. Real, non-trivial, but never more than a modifier on whatever the unblocked value already was.
+
+   Bytes side does not match the R1 prediction either: end-of-run bytes/completed job = **315** (`results/M3b.csv`), **below** the R1–3 band (392–394) and the registered 350–450 prediction. End-of-run table+index = 287 MiB M3b vs 444 MiB R1 — M3b grew ~35 % less storage per second than R1. Whatever bloat does to M3b, it does it on a smaller footprint than the un-mitigated flat table.
+
+   The experiment that WOULD separate them, and is not run here: an M3b variant with the DROP path disabled entirely (sweeper only creates via ATTACH, never drops) would produce zero blocking events; its throughput trajectory would isolate the antagonist-snapshot + bloat components from the blocking overlay. A companion run with `lock_timeout` raised to hold DROPs longer would move the blocked-window throughput lower without changing bloat, closing the loop from the other side.
+
+![M3b DROP-attempt accumulation over time overlaid on throughput decay: DROP attempts per sweep tick grow from 3 to 11 across the wedge window; per-tick wall-clock duration grows from 4 s to 22 s; cumulative distinct partitions ever attempted for DROP grows monotonically to 11 by t = 1200 s. Chart shows the accumulation loop is real; the run does not identify it as the dominant cause of the throughput crater on its own.](results/M3b.locks.accumulation.png)
+
+Reading in one sentence: **the ATTACH-fixes-CREATE hypothesis is confirmed exactly by the lock graph, M3b's DROP-attempt accumulation is a real progressive ratchet, but this run cannot separate the marginal cost of that ratchet from the marginal cost of dead-tuple bloat from partitioning overhead — three-cause loss with a single-run design that only isolates one variable per delta.**
 
 **Collector under M3b (from `results/M3b.env.json`).** Two-probe collector kept sampling throughout the wedge: `disconnected_seconds_total = 0`, `reconnect_count = 0`, `shutdown_error_count = 2` (both correctly classified — the P.1 shutdown-classification fix works). Fast probe timeouts: **3** (at t = 2160 s, 2170 s, 2280 s) vs M3's **0**. These cluster with elevated `pg_locks` row counts — fast probe `row_count` around those samples runs 1500–2400 vs the M3 typical of ~76; fast probe `max query_ms = 836 ms`, vs M3's 248 ms. The collector's own scan of `pg_locks` slows under sustained lock-table pressure. The 400 ms fast timeout (calibrated from M3's max) is now borderline. Slow probe (2 s poll, 1500 ms timeout) held: `slow_query_timeout_count = 0`, `max query_ms = 887 ms` this run vs M3's 133 ms — 6.7× slower under the same wedge shape but larger `pg_locks` population. Slow probe was still well under its 1500 ms timeout.
 
