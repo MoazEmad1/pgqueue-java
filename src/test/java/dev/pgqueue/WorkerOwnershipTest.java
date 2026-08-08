@@ -183,6 +183,48 @@ class WorkerOwnershipTest {
                         + "via AttachingSweeper; before=" + before + " after=" + after);
     }
 
+    /*
+     M3b-nodrop regression: ownership invariant under the DROP-disabled
+     variant. Same partition-topology as M3b (worker owns parent + all
+     attached children); the drop path is deliberately not exercised
+     since it is by construction never invoked.
+     */
+    @Test
+    void m3bNoDropSetupAndAttachingCyclingWorkEntirelyAsWorker() throws Exception {
+        new Mitigation.PartitionAttachNoDrop(
+                Duration.ofSeconds(60), Duration.ofSeconds(60), 3)
+                .setup(workerDs);
+
+        assertOwnedByWorker("pgqueue.jobs",
+                "partitioned parent created by worker (M3b-nodrop setup)");
+        assertOwnedByWorker("pgqueue.jobs_id_seq",
+                "sequence recreated by worker (M3b-nodrop setup)");
+        int partitions = countPartitions();
+        assertTrue(partitions >= 3,
+                "M3b-nodrop setup should have ATTACHed >= 3 initial partitions, got "
+                        + partitions);
+        for (String name : partitionNames()) {
+            assertOwnedByWorker("pgqueue." + name,
+                    "partition ATTACHed by NoDropAttachingSweeper.ensureFuturePartitions");
+        }
+
+        // No drop-path assertion by design: M3b-nodrop never calls
+        // dropCompletedPartitions(). Exercise the sweep loop's create side
+        // once more to confirm ownership stays consistent across ticks.
+        NoDropAttachingSweeper sweeper = new NoDropAttachingSweeper(
+                workerDs, Duration.ofSeconds(60), Duration.ofSeconds(60), 3);
+        sweeper.ensureFuturePartitions();
+        int after = countPartitions();
+        assertEquals(partitions, after,
+                "second ensureFuturePartitions must not add partitions when the "
+                        + "runway is already at futureCount; got before=" + partitions
+                        + " after=" + after);
+        for (String name : partitionNames()) {
+            assertOwnedByWorker("pgqueue." + name,
+                    "partition still worker-owned after a second sweep tick");
+        }
+    }
+
     private void forcePastAllDonePartition(Sweeper sweeper) throws Exception {
         long widthSec = 60;
         long nowFloor = (java.time.Instant.now().getEpochSecond() / widthSec) * widthSec;

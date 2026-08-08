@@ -20,6 +20,7 @@ import java.util.List;
 public sealed interface Mitigation
         permits Mitigation.None, Mitigation.TableAlter,
                 Mitigation.PartitionDrop, Mitigation.PartitionAttach,
+                Mitigation.PartitionAttachNoDrop,
                 Mitigation.AppendOnlyLog {
 
     Mitigation NONE = new None();
@@ -134,6 +135,51 @@ public sealed interface Mitigation
         @Override
         public AutoCloseable start(DataSource ds) {
             AttachingSweeper s = new AttachingSweeper(ds, partitionWidth, sweepInterval, futureCount);
+            s.start();
+            return s;
+        }
+    }
+
+    /*
+     M3b-nodrop — same schema and sweep cadence as M3b, but the sweeper
+     never calls dropCompletedPartitions(). Zero DROP TABLE statements,
+     zero AccessExclusive requests on the parent, zero blocking events
+     downstream. Isolates blocking cost from dead-tuple / partition-count
+     cost in the M3b verdict. See docs/m3b-nodrop.md for the registered
+     prediction and the exact limitation clauses.
+     */
+    record PartitionAttachNoDrop(Duration partitionWidth, Duration sweepInterval, int futureCount)
+            implements Mitigation {
+
+        @Override public String name() { return "M3b-nodrop"; }
+
+        @Override
+        public void setup(DataSource ds) throws SQLException {
+            try (Connection c = ds.getConnection(); Statement st = c.createStatement()) {
+                st.execute("DROP TABLE pgqueue.jobs");
+                st.execute("CREATE SEQUENCE IF NOT EXISTS pgqueue.jobs_id_seq");
+                st.execute("""
+                        CREATE TABLE pgqueue.jobs (
+                            id          bigint            NOT NULL DEFAULT nextval('pgqueue.jobs_id_seq'),
+                            payload     bytea             NOT NULL,
+                            state       pgqueue.job_state NOT NULL DEFAULT 'pending',
+                            created_at  timestamptz       NOT NULL DEFAULT now(),
+                            claimed_at  timestamptz,
+                            done_at     timestamptz,
+                            PRIMARY KEY (id, created_at)
+                        ) PARTITION BY RANGE (created_at)
+                        """);
+                st.execute("ALTER SEQUENCE pgqueue.jobs_id_seq OWNED BY pgqueue.jobs.id");
+                st.execute("CREATE INDEX idx_jobs_claimable ON pgqueue.jobs (state, created_at)");
+            }
+            new NoDropAttachingSweeper(ds, partitionWidth, sweepInterval, futureCount)
+                    .ensureFuturePartitions();
+        }
+
+        @Override
+        public AutoCloseable start(DataSource ds) {
+            NoDropAttachingSweeper s = new NoDropAttachingSweeper(
+                    ds, partitionWidth, sweepInterval, futureCount);
             s.start();
             return s;
         }

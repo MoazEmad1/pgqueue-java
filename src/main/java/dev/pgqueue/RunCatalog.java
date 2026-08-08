@@ -55,6 +55,14 @@ public final class RunCatalog {
             Duration.ofSeconds(60), Duration.ofSeconds(60), 5);
 
     /*
+     Per docs/m3b-nodrop.md — same schema and sweep cadence as M3b, but
+     the sweeper never issues DROP TABLE. Isolates blocking cost from
+     dead-tuple / partition-count cost in the M3b verdict.
+     */
+    static final Mitigation M3B_NODROP = new Mitigation.PartitionAttachNoDrop(
+            Duration.ofSeconds(60), Duration.ofSeconds(60), 5);
+
+    /*
      Per docs/experiment.md — payload table is insert-only, claim + done
      state moves to a separate append-only log. Nothing gets UPDATEd, so
      the queue itself produces no MVCC dead tuples independent of the
@@ -71,6 +79,7 @@ public final class RunCatalog {
             case "M2" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M2);
             case "M3" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3);
             case "M3b" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3B);
+            case "M3b-nodrop" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M3B_NODROP);
             case "M4" -> saturatedPlan(runId, duration, Duration.ofMinutes(5), M4);
             default   -> throw new IllegalArgumentException("unknown run id: " + runId);
         };
